@@ -27,6 +27,15 @@ visually indistinguishable — see [Validation](#validation)).
 - Output is 8-bit (or 16-bit) LZW TIFF with the Nikon sRGB profile embedded —
   byte-for-byte the format NX Studio writes.
 
+## TIFF or DNG — which do I want?
+
+- **TIFF** — the finished photo *with* the Nikon look (what NX Studio produces).
+  Most people want this.
+- **DNG** — the raw, for re-editing later. It does **not** carry the Nikon look:
+  opened in Lightroom / Apple Photos / Capture One it renders with *their* color
+  science, so **it will look different from NX Studio** — the exact mismatch this
+  tool exists to avoid. Use DNG to keep raw latitude, not for the look.
+
 ## How it works
 
 A small C++/Objective-C++ helper (`nef_render`) links Nikon's `libImgSDK.dylib`
