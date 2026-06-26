@@ -1,0 +1,4 @@
+# Build artifacts + staged SDK runtime (reproducible via build.sh)
+nef_render
+*.o
+Contents/

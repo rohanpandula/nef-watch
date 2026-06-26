@@ -1,0 +1,20 @@
+# Proprietary — obtain from Nikon, never commit/redistribute
+Image SDK/
+**/prm.bin
+
+# Personal photos / test data
+testimages/
+*.zip
+*.NEF
+*.nef
+*.tif
+*.TIF
+*.dng
+
+# Build artifacts
+tool/nef_render
+tool/Contents/
+*.o
+
+# macOS
+.DS_Store
