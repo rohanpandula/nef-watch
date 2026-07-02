@@ -20,8 +20,11 @@
 
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/bin/env</string>
-		<string>python3</string>
+		<!-- ABSOLUTE path to the python3 that has pillow+numpy installed.
+		     launchd does NOT inherit your shell PATH — a bare "python3" or
+		     /usr/bin/env here resolves to Apple's system Python (no pillow)
+		     and crash-loops under KeepAlive. Find yours with: which python3 -->
+		<string>/REPLACE/WITH/ABSOLUTE/PATH/TO/python3</string>
 		<!-- Absolute path to nef_watch.py in your nef-watch checkout -->
 		<string>/REPLACE/WITH/ABSOLUTE/PATH/tool/nef_watch.py</string>
 		<!-- Folder to watch for incoming NEFs -->

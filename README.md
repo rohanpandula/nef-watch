@@ -72,7 +72,7 @@ preserves the raw sensor data and therefore does not bake in the Nikon look
   <https://sdk.nikonimaging.com/> (free, application required). It is proprietary
   and **not** redistributed here. Point the build at it via `SDK_DIR` (see below).
 - **Xcode command-line tools** (`clang++`).
-- **Python 3.9+** with `pillow` and `numpy` (`tifffile` only for `--bits 16`).
+- **Python 3.9+** with `pillow` and `numpy` (`tifffile` + `imagecodecs` only for `--bits 16`).
 - **exiftool** (recommended) — `brew install exiftool`. Without it, `nef-watch`
   warns once at startup and outputs carry no EXIF (the render itself is
   unaffected).
@@ -101,7 +101,7 @@ works after a build). DNG-only use needs neither the SDK nor this build step.
 For the Python side, either install dependencies normally:
 
 ```bash
-pip install pillow numpy tifffile
+pip install pillow numpy tifffile imagecodecs
 ```
 
 or skip that entirely — `nef_watch.py` carries inline PEP 723 script metadata, so
@@ -168,8 +168,11 @@ cp contrib/com.nef-watch.plist ~/Library/LaunchAgents/
 ```
 
 Edit the placeholders in `~/Library/LaunchAgents/com.nef-watch.plist` (marked
-with XML comments): the absolute path to `nef_watch.py`, the watch folder, the
-output folder, and your `--log-file` path. Then load it:
+with XML comments): the absolute path to a `python3` that has pillow/numpy
+installed (launchd does **not** inherit your shell `PATH` — a bare `python3`
+resolves to Apple's system Python and crash-loops under `KeepAlive`; use the
+output of `which python3`), the absolute path to `nef_watch.py`, the watch
+folder, the output folder, and your `--log-file` path. Then load it:
 
 ```bash
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.nef-watch.plist

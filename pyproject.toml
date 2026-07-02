@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tiff16 = ["tifffile"]
+tiff16 = ["tifffile", "imagecodecs"]
 
 [project.urls]
 Homepage = "https://github.com/rohanpandula/nef-watch"

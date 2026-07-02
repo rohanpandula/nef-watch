@@ -16,7 +16,7 @@ Examples:
 """
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["pillow", "numpy"]
+# dependencies = ["pillow", "numpy", "tifffile", "imagecodecs"]
 # ///
 import argparse
 import concurrent.futures as cf
@@ -63,8 +63,11 @@ def log(msg):
 def configure_logging(path):
     global LOG_FILE
     if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        LOG_FILE = open(path, "a", encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            LOG_FILE = open(path, "a", encoding="utf-8")
+        except OSError as e:
+            sys.exit(f"cannot open log file {path}: {e}")
 
 
 def is_raw_file(path):
@@ -98,6 +101,16 @@ def parse_quality(value):
     if not 1 <= quality <= 100:
         raise argparse.ArgumentTypeError("quality must be between 1 and 100")
     return quality
+
+
+def parse_exp_comp(value):
+    try:
+        ev = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("exp-comp must be a number")
+    if not -5.0 <= ev <= 5.0:  # also rejects nan/inf before they reach the SDK
+        raise argparse.ArgumentTypeError("exp-comp must be between -5 and 5 EV")
+    return ev
 
 
 def needs_raster(args):
@@ -224,7 +237,11 @@ def render_raster(nef, todo, args, icc):
                 encode_tiff(arr, tmp_out, icc)
             else:
                 encode_jpeg(arr, tmp_out, icc, args.quality)
-            copy_exif(nef, tmp_out, args)
+            try:
+                copy_exif(nef, tmp_out, args)
+            except RuntimeError as e:
+                # a failed metadata copy shouldn't void a good render
+                log(f"warning: EXIF copy failed for {nef.name}: {e} — writing without EXIF")
             os.replace(tmp_out, out_path)
     finally:
         try:
@@ -359,7 +376,11 @@ def run_once(args, out_dir, icc):
             collect(fut)
     except KeyboardInterrupt:
         log("interrupted — finishing in-flight file(s); queued files cancelled")
-        ex.shutdown(wait=True, cancel_futures=True)
+        try:
+            ex.shutdown(wait=True, cancel_futures=True)
+        except KeyboardInterrupt:
+            log("second interrupt — exiting immediately (outputs stay atomic)")
+            os._exit(130)
         for fut in futs:
             if fut not in handled and fut.done() and not fut.cancelled():
                 collect(fut)
@@ -367,7 +388,11 @@ def run_once(args, out_dir, icc):
         log(f"partial: {ok} converted, {skip} skipped, {err} errors, {not_started} not-started")
         return 130
     finally:
-        ex.shutdown(wait=True, cancel_futures=True)
+        try:
+            ex.shutdown(wait=True, cancel_futures=True)
+        except KeyboardInterrupt:
+            log("second interrupt — exiting immediately (outputs stay atomic)")
+            os._exit(130)
     log(f"done: {ok} converted, {skip} skipped, {err} errors")
     return 1 if err else 0
 
@@ -474,11 +499,23 @@ def run_watch(args, out_dir, icc):
                     log(f"  [{n}] {nef.name} -> ERROR: {detail}")
                     if attempts >= 3:
                         log(f"giving up after 3 failures for {nef.name}: {detail} (will retry if file changes)")
+            # prune bookkeeping for files that vanished from the watched folder,
+            # so week-long sessions don't accumulate state for every file ever seen
+            present = set(nefs)
+            active = set(inflight.values())
+            for d in (sizes, failures):
+                for p in [p for p in d if p not in present and p not in active]:
+                    del d[p]
+            processed &= present | active
             time.sleep(args.interval)
     except KeyboardInterrupt:
         log("stopping, finishing in-flight conversions…")
     finally:
-        ex.shutdown(wait=True)
+        try:
+            ex.shutdown(wait=True)
+        except KeyboardInterrupt:
+            log("second interrupt — exiting immediately (outputs stay atomic)")
+            os._exit(130)
     log(f"stopped. {len(processed)} file(s) handled this session.")
     return 0
 
@@ -511,7 +548,8 @@ def main():
     ap.add_argument("--once", action="store_true", help="convert existing NEFs once, then exit (default: keep watching)")
     ap.add_argument("--jobs", "-j", type=int, default=4, help="parallel workers (default 4)")
     ap.add_argument("--bits", type=int, choices=(8, 16), default=8, help="TIFF bit depth (default 8)")
-    ap.add_argument("--exp-comp", type=float, default=0.0, help="exposure compensation in EV for TIFF/JPEG (default 0.0)")
+    ap.add_argument("--exp-comp", type=parse_exp_comp, default=0.0,
+                    help="exposure compensation in EV for TIFF/JPEG, -5..5 (default 0.0)")
     ap.add_argument("--dng-engine", choices=("dnglab", "adobe"), default="dnglab",
                     help="DNG backend (default dnglab; adobe needs the app installed)")
     ap.add_argument("--dng-embed-original", action="store_true",
