@@ -226,12 +226,15 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 - Orientation on TIFF/JPEG output is always normalized to `1` — the pixels are
   already rotated to display orientation by the SDK, so this is correct, but it
   means the output's Orientation tag does not simply mirror the source NEF's.
-- Renders of NEFs shot on **native Z lenses are not bit-reproducible run to run**:
-  the SDK's mandatory distortion-correction resample is thread-scheduling
-  dependent (measured MAE ≈ 4.8/255, max ≈ 34 between two renders of the same
-  file — visually identical, but don't expect byte-equal outputs). Third-party
-  lenses without correction profiles (no distortion correction applied) render
-  deterministically.
+- **Some NEFs are not bit-reproducible run to run** through the SDK: two renders
+  of the same file can differ by MAE ≈ 5/255 (max ≈ 35) in a noise-like pattern
+  across the whole frame — visually identical, but don't build byte-equality
+  checks on rendered output. In testing this hit every file from one lens
+  (NIKKOR Z 40mm f/2, 3/3 files) and none from others (manual/adapted glass,
+  NIKKOR Z 50mm f/1.4; 6/6 stable) regardless of ISO, Picture Control, white
+  balance, or body firmware — it looks like thread-timing jitter in a
+  correction stage the SDK engages only for some lenses' data. If you need
+  byte-stable output, verify your lens with two renders and `cmp`.
 
 ## License
 
