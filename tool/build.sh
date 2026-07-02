@@ -8,10 +8,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK="${SDK_DIR:-/Users/rohan/Downloads/nx-tiffexport/Image SDK/Library/Mac}"
 SAMPLE="$SDK/Sample"
 LIBDIR="$SAMPLE/Lib/release"
+PROFILE="$SDK/Profiles/NKsRGB.icm"
 
 if [[ ! -f "$LIBDIR/libImgSDK.dylib" ]]; then
   echo "ERROR: SDK not found. Set SDK_DIR to your 'Image SDK/Library/Mac'." >&2
   echo "  looked in: $LIBDIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PROFILE" ]]; then
+  echo "ERROR: Nikon sRGB profile not found in the SDK." >&2
+  echo "  looked in: $PROFILE" >&2
   exit 1
 fi
 
@@ -21,6 +28,9 @@ xattr -dr com.apple.quarantine "$SDK" 2>/dev/null || true
 # The SDK requires prm.bin at <executable>/Contents/Resources/prm.bin at render time.
 mkdir -p "$HERE/Contents/Resources"
 cp -f "$SAMPLE/Resources/prm.bin" "$HERE/Contents/Resources/prm.bin"
+
+# Stage the Nikon sRGB profile as nef_watch.py's default --profile.
+cp -f "$PROFILE" "$HERE/Contents/Resources/NKsRGB.icm"
 
 COMMON=(-std=c++17 -O2 -Wno-deprecated-declarations -I"$SAMPLE" -I"$SDK/Include" -include "$HERE/prefix.h")
 
@@ -39,3 +49,4 @@ clang++ "$HERE/nef_render.o" "$HERE/NkImageLibCtrl.o" "$HERE/NkILSampleUtils.o" 
 rm -f "$HERE"/*.o
 echo "built: $HERE/nef_render"
 echo "staged: $HERE/Contents/Resources/prm.bin"
+echo "staged: $HERE/Contents/Resources/NKsRGB.icm"

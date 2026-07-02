@@ -1,0 +1,20 @@
+[project]
+name = "nef-watch"
+version = "0.2.0"
+description = "Watch a folder for Nikon NEFs and convert them to TIFF/JPEG (Nikon in-camera look) and/or DNG."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "pillow",
+    "numpy",
+]
+
+[project.optional-dependencies]
+tiff16 = ["tifffile"]
+
+[project.urls]
+Homepage = "https://github.com/rohanpandula/nef-watch"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
