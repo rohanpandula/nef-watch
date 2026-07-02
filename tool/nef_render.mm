@@ -26,6 +26,25 @@ static int channelsForColor(unsigned long ulColor) {
     }
 }
 
+// Human-readable text for Nkfl_Interface.h kNkfl_Code_Err_* values, so SDK
+// failures print more than a raw hex code. Verified against Nkfl_Interface.h.
+static const char* nkflErrText(unsigned long code) {
+    switch (code) {
+        case 0x0001: return "out of memory";
+        case 0x0002: return "out of resources";
+        case 0x0003: return "unsupported operation or file/camera type";
+        case 0x0004: return "invalid parameter — corrupt or truncated file (possibly still copying)";
+        case 0x0005: return "wrong call sequence";
+        case 0x0006: return "SDK support file missing (dylib/prm.bin)";
+        case 0x0007: return "SDK version mismatch";
+        case 0x0008: return "unexpected SDK error";
+        case 0x0009: return "file I/O error";
+        case 0x000E: return "invalid tag data";
+        case 0x0013: return "no shooting data found in image";
+        default:     return "SDK error";
+    }
+}
+
 int main(int argc, char** argv) {
     @autoreleasepool {
         if (argc < 4) {
@@ -42,12 +61,15 @@ int main(int argc, char** argv) {
         NSApplicationLoad();  // init AppKit for headless use (no run loop needed)
 
         unsigned long err = CImageLibCtrl::OpenLibrary();
-        if (err != kNkfl_Code_None) { fprintf(stderr, "OpenLibrary 0x%04lx\n", err); return 2; }
+        if (err != kNkfl_Code_None) {
+            fprintf(stderr, "OpenLibrary failed: %s [0x%04lx]\n", nkflErrText(err), err);
+            return 2;
+        }
 
         CImageLibCtrl ctrl;
         err = ctrl.OpenSession((void*)nefPath);
         if (err != kNkfl_Code_None) {
-            fprintf(stderr, "OpenSession '%s' 0x%04lx\n", nefPath, err);
+            fprintf(stderr, "OpenSession '%s' failed: %s [0x%04lx]\n", nefPath, nkflErrText(err), err);
             CImageLibCtrl::CloseLibrary();
             return 3;
         }
@@ -75,7 +97,7 @@ int main(int argc, char** argv) {
         NkIL_ImageInfo info = {0};
         err = ctrl.GetImageInfo(&info);
         if (err != kNkfl_Code_None) {
-            fprintf(stderr, "GetImageInfo 0x%04lx\n", err);
+            fprintf(stderr, "GetImageInfo failed: %s [0x%04lx]\n", nkflErrText(err), err);
             ctrl.CloseSession(); CImageLibCtrl::CloseLibrary();
             return 4;
         }
@@ -92,7 +114,7 @@ int main(int argc, char** argv) {
         p.pData = buf.data();
         err = ctrl.GetImageData(&p);
         if (err != kNkfl_Code_None) {
-            fprintf(stderr, "GetImageData 0x%04lx\n", err);
+            fprintf(stderr, "GetImageData failed: %s [0x%04lx]\n", nkflErrText(err), err);
             ctrl.CloseSession(); CImageLibCtrl::CloseLibrary();
             return 5;
         }
