@@ -227,14 +227,20 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
   already rotated to display orientation by the SDK, so this is correct, but it
   means the output's Orientation tag does not simply mirror the source NEF's.
 - **Some NEFs are not bit-reproducible run to run** through the SDK: two renders
-  of the same file can differ by MAE ≈ 5/255 (max ≈ 35) in a noise-like pattern
-  across the whole frame — visually identical, but don't build byte-equality
-  checks on rendered output. In testing this hit every file from one lens
-  (NIKKOR Z 40mm f/2, 3/3 files) and none from others (manual/adapted glass,
-  NIKKOR Z 50mm f/1.4; 6/6 stable) regardless of ISO, Picture Control, white
-  balance, or body firmware — it looks like thread-timing jitter in a
-  correction stage the SDK engages only for some lenses' data. If you need
-  byte-stable output, verify your lens with two renders and `cmp`.
+  of the same file can differ by MAE ≈ 5/255 (max ≈ 35) in a fine, noise-like
+  pattern across the whole frame — visually identical, but don't build
+  byte-equality checks on rendered output. Root cause (traced by symbol
+  interposition): the SDK drives a **dithering stage from the C library's
+  `rand()`, seeded non-deterministically each run**, so the dither pattern
+  changes every render. It's applied only on some render paths — many files are
+  perfectly stable — and which path a file takes depends on its in-camera tone
+  processing (adaptive tone / Active D-Lighting-style stages), not on the lens,
+  Picture Control, ISO, or firmware (each of those was ruled out with
+  same-setting files landing on both sides). Freezing `rand()` via
+  `DYLD_INSERT_LIBRARIES` makes output byte-identical with no change in
+  appearance or accuracy vs NX Studio, confirming the dither as the sole source.
+  If you need byte-stable output, verify a given file with two renders and
+  `cmp`.
 
 ## License
 
