@@ -14,6 +14,10 @@ Examples:
   # one-shot: convert everything already in a folder, then exit
   ./nef_watch.py ~/Shoot --out ~/Shoot/tiff --once -j 6
 """
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pillow", "numpy"]
+# ///
 import argparse
 import concurrent.futures as cf
 import os
@@ -21,7 +25,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -32,11 +38,70 @@ Image.MAX_IMAGE_PIXELS = None
 HERE = Path(__file__).resolve().parent
 DEFAULT_RENDER_BIN = HERE / "nef_render"
 DEFAULT_SDK = Path("/Users/rohan/Downloads/nx-tiffexport/Image SDK/Library/Mac")
-DEFAULT_PROFILE = DEFAULT_SDK / "Profiles" / "NKsRGB.icm"
+STAGED_PROFILE = HERE / "Contents" / "Resources" / "NKsRGB.icm"
+DEFAULT_PROFILE = STAGED_PROFILE if STAGED_PROFILE.exists() else DEFAULT_SDK / "Profiles" / "NKsRGB.icm"
+RAW_SUFFIXES = {".nef", ".nrw"}
+FORMAT_ORDER = ("tiff", "jpeg", "dng")
+RASTER_FORMATS = {"tiff", "jpeg"}
+EXTS = {"tiff": ".tif", "jpeg": ".jpg", "dng": ".dng"}
+LOG_FILE = None
+LOG_LOCK = threading.Lock()
 
 
 def log(msg):
-    print(msg, flush=True)
+    stamp = time.strftime("[%H:%M:%S] ")
+    lines = str(msg).splitlines() or [""]
+    with LOG_LOCK:
+        for line in lines:
+            out = stamp + line
+            print(out, flush=True)
+            if LOG_FILE:
+                LOG_FILE.write(out + "\n")
+                LOG_FILE.flush()
+
+
+def configure_logging(path):
+    global LOG_FILE
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE = open(path, "a", encoding="utf-8")
+
+
+def is_raw_file(path):
+    return path.suffix.lower() in RAW_SUFFIXES
+
+
+def parse_formats(value):
+    out = set()
+    for part in value.split(","):
+        name = part.strip().lower()
+        if not name:
+            continue
+        if name == "both":
+            out.update(("tiff", "dng"))
+        elif name in FORMAT_ORDER:
+            out.add(name)
+        else:
+            raise argparse.ArgumentTypeError(
+                "format must be a comma-separated set of tiff,jpeg,dng (or both)"
+            )
+    if not out:
+        raise argparse.ArgumentTypeError("at least one output format is required")
+    return frozenset(out)
+
+
+def parse_quality(value):
+    try:
+        quality = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("quality must be an integer")
+    if not 1 <= quality <= 100:
+        raise argparse.ArgumentTypeError("quality must be between 1 and 100")
+    return quality
+
+
+def needs_raster(args):
+    return bool(args.formats & RASTER_FORMATS)
 
 
 def read_nkraw(path):
@@ -61,6 +126,10 @@ def read_nkraw(path):
     return arr, dict(w=w, h=h, ch=ch, depth=depth, orient=orient)
 
 
+def unique_partial(out_path):
+    return out_path.with_name(f"{out_path.stem}.{uuid.uuid4().hex}.partial{out_path.suffix}")
+
+
 def encode_tiff(arr, out_path, icc_bytes):
     """8-bit -> Pillow (validated format); 16-bit -> tifffile. Both LZW + ICC."""
     if arr.dtype == np.uint8:
@@ -77,90 +146,175 @@ def encode_tiff(arr, out_path, icc_bytes):
         )
 
 
-def render_tiff(nef, out_path, args, icc):
-    """SDK develop -> 8/16-bit LZW Nikon-sRGB TIFF (atomic). This is the path that
-    bakes in Nikon's in-camera look."""
+def jpeg_pixels(arr):
+    if arr.dtype == np.uint8:
+        return arr
+    return ((arr.astype(np.uint32) * 255 + 32767) // 65535).astype(np.uint8)
+
+
+def encode_jpeg(arr, out_path, icc_bytes, quality):
+    Image.fromarray(jpeg_pixels(arr)).save(
+        out_path, format="JPEG", quality=quality, icc_profile=icc_bytes
+    )
+
+
+def copy_exif(nef, tmp_out, args):
+    if not args.exiftool:
+        return
+    proc = subprocess.run(
+        [
+            str(args.exiftool),
+            "-q",
+            "-overwrite_original",
+            "-tagsFromFile",
+            str(nef),
+            "-EXIF:all",
+            "-makernotes",
+            "-Orientation#=1",
+            "-ExifImageWidth=",
+            "-ExifImageHeight=",
+            str(tmp_out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["failed"]
+        raise RuntimeError(f"exiftool: {tail[0]}")
+
+
+def warn_if_bad_magic(nef):
+    try:
+        with open(nef, "rb") as f:
+            magic = f.read(4)
+    except OSError:
+        return
+    if magic not in (b"II*\0", b"MM\0*"):
+        log(f"warning: {nef.name} does not look like a NEF/NRW (JPEG?) — attempting anyway")
+
+
+def render_raster(nef, todo, args, icc):
+    """SDK develop -> TIFF/JPEG (atomic). TIFF/JPEG share one SDK develop."""
     with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as tf:
         raw = tf.name
+    tmps = []
     try:
+        develop_bits = args.bits if "tiff" in args.formats else 8
         proc = subprocess.run(
-            [str(args.render_bin), str(nef), raw, str(args.profile), str(args.bits)],
-            capture_output=True, text=True,
+            [
+                str(args.render_bin),
+                str(nef),
+                raw,
+                str(args.profile),
+                str(develop_bits),
+                str(args.exp_comp),
+            ],
+            capture_output=True,
+            text=True,
         )
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
             raise RuntimeError(f"render exit {proc.returncode}: {tail[0]}")
         arr, _ = read_nkraw(raw)
-        # temp file + atomic rename, so a partial TIFF never appears at the final path
-        tmp_out = out_path.with_name(out_path.name + ".partial")
-        encode_tiff(arr, tmp_out, icc)
-        os.replace(tmp_out, out_path)
+        for kind, out_path in todo:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_out = unique_partial(out_path)
+            tmps.append(tmp_out)
+            if kind == "tiff":
+                encode_tiff(arr, tmp_out, icc)
+            else:
+                encode_jpeg(arr, tmp_out, icc, args.quality)
+            copy_exif(nef, tmp_out, args)
+            os.replace(tmp_out, out_path)
     finally:
         try:
             os.unlink(raw)
         except OSError:
             pass
+        for tmp_out in tmps:
+            try:
+                tmp_out.unlink()
+            except OSError:
+                pass
 
 
 def render_dng(nef, out_path, args):
     """Raw transcode NEF -> DNG via dnglab (default) or Adobe DNG Converter (atomic).
     A DNG preserves the raw sensor data — it does NOT bake in the Nikon look."""
-    tmp = out_path.with_name(out_path.stem + ".partial.dng")
-    if tmp.exists():
-        tmp.unlink()
-    if args.dng_engine == "dnglab":
-        cmd = [str(args.dng_bin), "convert", "-c", "lossless",
-               "--embed-raw", "true" if args.dng_embed_original else "false",
-               str(nef), str(tmp)]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0 or not tmp.exists():
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["failed"]
-            raise RuntimeError(f"dnglab: {tail[0]}")
-    else:  # adobe — drives the app's CLI; not verified on this machine
-        with tempfile.TemporaryDirectory() as td:
-            cmd = [str(args.dng_bin), "-c"]
-            if args.dng_embed_original:
-                cmd += ["-e"]
-            cmd += ["-d", td, "-o", tmp.name, str(nef)]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = unique_partial(out_path)
+    try:
+        if args.dng_engine == "dnglab":
+            cmd = [str(args.dng_bin), "convert", "-c", "lossless",
+                   "--embed-raw", "true" if args.dng_embed_original else "false",
+                   str(nef), str(tmp)]
             proc = subprocess.run(cmd, capture_output=True, text=True)
-            produced = Path(td) / tmp.name
-            if proc.returncode != 0 or not produced.exists():
-                raise RuntimeError(f"Adobe DNG Converter failed (rc={proc.returncode})")
-            os.replace(produced, tmp)
-    os.replace(tmp, out_path)
+            if proc.returncode != 0 or not tmp.exists():
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["failed"]
+                raise RuntimeError(f"dnglab: {tail[0]}")
+        else:  # adobe — drives the app's CLI; not verified on this machine
+            with tempfile.TemporaryDirectory() as td:
+                cmd = [str(args.dng_bin), "-c"]
+                if args.dng_embed_original:
+                    cmd += ["-e"]
+                cmd += ["-d", td, "-o", tmp.name, str(nef)]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                produced = Path(td) / tmp.name
+                if proc.returncode != 0 or not produced.exists():
+                    raise RuntimeError(f"Adobe DNG Converter failed (rc={proc.returncode})")
+                os.replace(produced, tmp)
+        os.replace(tmp, out_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def expected_outputs(nef, args, out_dir):
+    parent = out_dir
+    if args.recursive and not args.input_is_file:
+        try:
+            rel = nef.relative_to(args.input_root)
+            parent = out_dir / rel.parent
+        except ValueError:
+            parent = out_dir
+    return [(kind, parent / (nef.stem + EXTS[kind]))
+            for kind in FORMAT_ORDER if kind in args.formats]
 
 
 def convert_one(nef, out_dir, args, icc):
     """Produce the requested output(s) for one NEF. Returns (status, detail) with
     status in {ok,skip,error}. Safe to run concurrently."""
-    wanted = []
-    if args.format in ("tiff", "both"):
-        wanted.append(("tif", out_dir / (nef.stem + ".tif")))
-    if args.format in ("dng", "both"):
-        wanted.append(("dng", out_dir / (nef.stem + ".dng")))
+    wanted = expected_outputs(nef, args, out_dir)
     todo = [(kind, p) for kind, p in wanted if args.overwrite or not p.exists()]
     if not todo:
         return "skip", "exists"
     t0 = time.time()
-    out_dir.mkdir(parents=True, exist_ok=True)
     made = []
     try:
+        warn_if_bad_magic(nef)
+        raster_todo = [(kind, p) for kind, p in todo if kind in RASTER_FORMATS]
+        if raster_todo:
+            render_raster(nef, raster_todo, args, icc)
+            made.extend(p.suffix for _, p in raster_todo)
         for kind, outp in todo:
-            if kind == "tif":
-                render_tiff(nef, outp, args, icc)
-            else:
+            if kind == "dng":
                 render_dng(nef, outp, args)
-            made.append("." + kind)
+                made.append(outp.suffix)
     except RuntimeError as e:
         return "error", str(e)
     return "ok", f"{'+'.join(made)}  ({time.time()-t0:.1f}s)"
 
 
-def find_nefs(folder, recursive):
+def find_nefs(path, recursive):
+    if path.is_file():
+        return [path] if is_raw_file(path) else []
+    folder = path
     globber = folder.rglob if recursive else folder.glob
     seen = {}
     for p in globber("*"):
-        if p.is_file() and p.suffix.lower() == ".nef":
+        if p.is_file() and is_raw_file(p):
             seen[p] = p
     return sorted(seen)
 
@@ -172,29 +326,59 @@ def _submit(ex, nef, args, out_dir, icc):
 def run_once(args, out_dir, icc):
     nefs = find_nefs(args.input, args.recursive)
     if not nefs:
-        log(f"no NEFs found in {args.input}")
+        log(f"no NEF/NRW files found in {args.input}")
         return 0
-    log(f"converting {len(nefs)} NEF(s) -> {out_dir}  ({args.jobs} parallel)")
+    log(f"converting {len(nefs)} NEF/NRW file(s) -> {out_dir}  ({args.jobs} parallel)")
     total = len(nefs)
     ok = skip = err = 0
     done = 0
-    with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {_submit(ex, nef, args, out_dir, icc): nef for nef in nefs}
+    handled = set()
+    futs = {}
+
+    def collect(fut):
+        nonlocal ok, skip, err, done
+        nef = futs[fut]
+        handled.add(fut)
+        done += 1
+        try:
+            status, detail = fut.result()
+        except Exception as e:
+            status, detail = "error", str(e)
+        if status == "ok":
+            ok += 1;   log(f"  [{done}/{total}] {nef.name} -> {detail}")
+        elif status == "skip":
+            skip += 1; log(f"  [{done}/{total}] {nef.name} -> skip (exists)")
+        else:
+            err += 1;  log(f"  [{done}/{total}] {nef.name} -> ERROR: {detail}")
+
+    ex = cf.ThreadPoolExecutor(max_workers=args.jobs)
+    try:
+        for nef in nefs:
+            futs[_submit(ex, nef, args, out_dir, icc)] = nef
         for fut in cf.as_completed(futs):
-            nef = futs[fut]
-            done += 1
-            try:
-                status, detail = fut.result()
-            except Exception as e:
-                status, detail = "error", str(e)
-            if status == "ok":
-                ok += 1;   log(f"  [{done}/{total}] {nef.name} -> {detail}")
-            elif status == "skip":
-                skip += 1; log(f"  [{done}/{total}] {nef.name} -> skip (exists)")
-            else:
-                err += 1;  log(f"  [{done}/{total}] {nef.name} -> ERROR: {detail}")
+            collect(fut)
+    except KeyboardInterrupt:
+        log("interrupted — finishing in-flight file(s); queued files cancelled")
+        ex.shutdown(wait=True, cancel_futures=True)
+        for fut in futs:
+            if fut not in handled and fut.done() and not fut.cancelled():
+                collect(fut)
+        not_started = sum(1 for fut in futs if fut.cancelled())
+        log(f"partial: {ok} converted, {skip} skipped, {err} errors, {not_started} not-started")
+        return 130
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
     log(f"done: {ok} converted, {skip} skipped, {err} errors")
     return 1 if err else 0
+
+
+def stat_key(path):
+    st = path.stat()
+    return st.st_size, st.st_mtime_ns
+
+
+def outputs_complete(nef, args, out_dir):
+    return all(path.exists() for _, path in expected_outputs(nef, args, out_dir))
 
 
 def run_watch(args, out_dir, icc):
@@ -202,41 +386,97 @@ def run_watch(args, out_dir, icc):
         f"(every {args.interval}s, {args.jobs} parallel, Ctrl-C to stop)")
     sizes = {}          # path -> last-seen size, for copy-completion stability
     processed = set()
+    failures = {}       # path -> attempts/size/mtime/next_retry_at/error
     inflight = {}       # future -> nef
     n = 0
+    unavailable = False
     ex = cf.ThreadPoolExecutor(max_workers=args.jobs)
     try:
         while True:
-            for nef in find_nefs(args.input, args.recursive):
+            if not args.input.exists() or not args.input.is_dir():
+                if not unavailable:
+                    log(f"warning: watched folder unavailable: {args.input} — waiting")
+                    unavailable = True
+                time.sleep(args.interval)
+                continue
+            if unavailable:
+                log(f"watched folder available again: {args.input}")
+                unavailable = False
+            try:
+                nefs = find_nefs(args.input, args.recursive)
+            except OSError:
+                if not unavailable:
+                    log(f"warning: watched folder unavailable: {args.input} — waiting")
+                    unavailable = True
+                time.sleep(args.interval)
+                continue
+
+            now = time.time()
+            for nef in nefs:
                 if nef in processed or nef in inflight.values():
                     continue
-                out_path = out_dir / (nef.stem + ".tif")
-                if out_path.exists() and not args.overwrite:
+                if not args.overwrite and outputs_complete(nef, args, out_dir):
                     processed.add(nef)
+                    failures.pop(nef, None)
                     continue
                 try:
-                    size = nef.stat().st_size
+                    size, mtime = stat_key(nef)
                 except OSError:
                     continue
+
+                state = failures.get(nef)
+                if state:
+                    if (size, mtime) != (state["size"], state["mtime"]):
+                        failures.pop(nef, None)
+                        sizes[nef] = size
+                        log(f"retry 1/3 {nef.name} (file changed)")
+                        continue
+                    if state["attempts"] >= 3:
+                        continue
+                    if now < state["next_retry_at"]:
+                        continue
+                    log(f"retry {state['attempts'] + 1}/3 {nef.name}")
+
                 # submit only once the file size has settled (done copying)
                 if sizes.get(nef) == size and size > 0:
                     inflight[_submit(ex, nef, args, out_dir, icc)] = nef
                 sizes[nef] = size
             for fut in [f for f in inflight if f.done()]:
                 nef = inflight.pop(fut)
-                processed.add(nef)
                 n += 1
                 try:
                     status, detail = fut.result()
                 except Exception as e:
                     status, detail = "error", str(e)
                 if status == "ok":
+                    processed.add(nef)
+                    failures.pop(nef, None)
                     log(f"  [{n}] {nef.name} -> {detail}")
+                elif status == "skip":
+                    processed.add(nef)
+                    failures.pop(nef, None)
+                    log(f"  [{n}] {nef.name} -> skip (exists)")
                 elif status == "error":
+                    try:
+                        size, mtime = stat_key(nef)
+                    except OSError:
+                        size, mtime = 0, 0
+                    prev = failures.get(nef)
+                    same = prev and (size, mtime) == (prev["size"], prev["mtime"])
+                    attempts = prev["attempts"] + 1 if same else 1
+                    failures[nef] = {
+                        "attempts": attempts,
+                        "size": size,
+                        "mtime": mtime,
+                        "next_retry_at": time.time() + args.interval * (2 ** attempts),
+                        "error": detail,
+                    }
                     log(f"  [{n}] {nef.name} -> ERROR: {detail}")
+                    if attempts >= 3:
+                        log(f"giving up after 3 failures for {nef.name}: {detail} (will retry if file changes)")
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        log("\nstopping, finishing in-flight conversions…")
+        log("stopping, finishing in-flight conversions…")
     finally:
         ex.shutdown(wait=True)
     log(f"stopped. {len(processed)} file(s) handled this session.")
@@ -263,13 +503,15 @@ def main():
         description="Watch a folder for Nikon NEFs and convert them to TIFF (Nikon look, via "
                     "the Image SDK) and/or DNG (raw transcode, no baked look).",
     )
-    ap.add_argument("input", type=Path, help="folder to watch / scan for .NEF files")
+    ap.add_argument("input", type=Path, help="folder to watch/scan, or a single .NEF/.NRW file")
     ap.add_argument("--out", "-o", type=Path, required=True, help="output folder")
-    ap.add_argument("--format", choices=("tiff", "dng", "both"), default="tiff",
-                    help="output format (default tiff). dng is a raw transcode — no Nikon look")
+    ap.add_argument("--format", dest="formats", type=parse_formats, default=parse_formats("tiff"),
+                    metavar="FORMATS", help="comma-separated output formats: tiff,jpeg,dng; both=tiff,dng")
+    ap.add_argument("--quality", type=parse_quality, default=90, help="JPEG quality 1-100 (default 90)")
     ap.add_argument("--once", action="store_true", help="convert existing NEFs once, then exit (default: keep watching)")
     ap.add_argument("--jobs", "-j", type=int, default=4, help="parallel workers (default 4)")
     ap.add_argument("--bits", type=int, choices=(8, 16), default=8, help="TIFF bit depth (default 8)")
+    ap.add_argument("--exp-comp", type=float, default=0.0, help="exposure compensation in EV for TIFF/JPEG (default 0.0)")
     ap.add_argument("--dng-engine", choices=("dnglab", "adobe"), default="dnglab",
                     help="DNG backend (default dnglab; adobe needs the app installed)")
     ap.add_argument("--dng-embed-original", action="store_true",
@@ -278,23 +520,46 @@ def main():
     ap.add_argument("--overwrite", action="store_true", help="re-convert even if the output already exists")
     ap.add_argument("--interval", type=float, default=3.0, help="watch poll interval in seconds (default 3)")
     ap.add_argument("--profile", type=Path, default=DEFAULT_PROFILE, help="output ICC profile (default: Nikon sRGB)")
+    ap.add_argument("--log-file", type=Path, help="also append timestamped log lines to this file")
     ap.add_argument("--render-bin", type=Path, default=DEFAULT_RENDER_BIN, help="path to the nef_render helper")
     args = ap.parse_args()
 
-    if not args.input.is_dir():
+    if args.log_file:
+        args.log_file = args.log_file.expanduser()
+    configure_logging(args.log_file)
+
+    args.input = args.input.expanduser()
+    args.out = args.out.expanduser()
+    args.render_bin = args.render_bin.expanduser()
+    args.profile = args.profile.expanduser()
+    args.input_is_file = args.input.is_file()
+    if args.input_is_file:
+        if not is_raw_file(args.input):
+            sys.exit(f"input file is not a NEF/NRW: {args.input}")
+        args.once = True
+        args.recursive = False
+        args.input_root = args.input.parent
+    elif args.input.is_dir():
+        args.input_root = args.input
+    else:
         sys.exit(f"input folder not found: {args.input}")
     if args.jobs < 1:
         args.jobs = 1
 
     # Validate only what the chosen format needs.
     icc = b""
-    if args.format in ("tiff", "both"):
+    if needs_raster(args):
         if not args.render_bin.exists():
             sys.exit(f"render helper not found: {args.render_bin}\n  build it: bash {HERE/'build.sh'}")
         if not args.profile.exists():
-            sys.exit(f"ICC profile not found: {args.profile}  (set --profile)")
+            sys.exit(f"ICC profile not found: {args.profile}\n  re-run: bash {HERE/'build.sh'}  (or set --profile)")
         icc = args.profile.read_bytes()
-    args.dng_bin = resolve_dng_engine(args) if args.format in ("dng", "both") else None
+        args.exiftool = shutil.which("exiftool")
+        if not args.exiftool:
+            log("warning: outputs will carry no EXIF — brew install exiftool")
+    else:
+        args.exiftool = None
+    args.dng_bin = resolve_dng_engine(args) if "dng" in args.formats else None
 
     if args.once:
         return run_once(args, out_dir=args.out, icc=icc)
