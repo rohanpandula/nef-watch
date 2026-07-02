@@ -134,6 +134,9 @@ tool/nef_watch.py ~/Shoot/DSC_0001.NEF --out ~/Shoot/tiff --once
 
 # .NRW (Coolpix raw) is matched everywhere .NEF is — no separate flag
 tool/nef_watch.py ~/Shoot --out ~/Shoot/tiff --once
+
+# Byte-reproducible output (pins the SDK's dither; same look)
+tool/nef_watch.py ~/Shoot --out ~/tiff --once --deterministic
 ```
 
 ### Options
@@ -148,6 +151,7 @@ tool/nef_watch.py ~/Shoot --out ~/Shoot/tiff --once
 | `--jobs`, `-j` | `4` | parallel workers |
 | `--bits {8,16}` | `8` | TIFF bit depth |
 | `--exp-comp` | `0.0` | exposure compensation in EV applied during the SDK develop (tiff/jpeg) |
+| `--deterministic` | off | byte-reproducible TIFF/JPEG — pin the SDK's `rand()`-seeded dither (same look; see [Limitations](#limitations)) |
 | `--dng-engine` | `dnglab` | `dnglab` or `adobe` |
 | `--dng-embed-original` | off | embed the original NEF inside the DNG |
 | `--recursive`, `-r` | off | scan subfolders; output mirrors the input folder structure |
@@ -239,8 +243,9 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
   same-setting files landing on both sides). Freezing `rand()` via
   `DYLD_INSERT_LIBRARIES` makes output byte-identical with no change in
   appearance or accuracy vs NX Studio, confirming the dither as the sole source.
-  If you need byte-stable output, verify a given file with two renders and
-  `cmp`.
+  **Pass `--deterministic`** to enable exactly this (it injects the
+  `rand_freeze.dylib` that `build.sh` builds) when you need byte-stable output —
+  for regression tests, content-addressed storage, or reproducible pipelines.
 
 ## License
 

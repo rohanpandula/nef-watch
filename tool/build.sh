@@ -47,6 +47,12 @@ clang++ "$HERE/nef_render.o" "$HERE/NkImageLibCtrl.o" "$HERE/NkILSampleUtils.o" 
   -o "$HERE/nef_render"
 
 rm -f "$HERE"/*.o
+
+# rand_freeze.dylib: optional determinism shim for nef_watch.py --deterministic.
+# Interposes libc rand()/srand() so the SDK's rand()-seeded dither is reproducible.
+clang -dynamiclib -O2 "$HERE/rand_freeze.c" -o "$HERE/rand_freeze.dylib"
+
 echo "built: $HERE/nef_render"
+echo "built: $HERE/rand_freeze.dylib"
 echo "staged: $HERE/Contents/Resources/prm.bin"
 echo "staged: $HERE/Contents/Resources/NKsRGB.icm"

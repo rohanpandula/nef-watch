@@ -224,6 +224,7 @@ def render_raster(nef, todo, args, icc):
             ],
             capture_output=True,
             text=True,
+            env=args.render_env,  # None => inherit; set for --deterministic
         )
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
@@ -550,6 +551,9 @@ def main():
     ap.add_argument("--bits", type=int, choices=(8, 16), default=8, help="TIFF bit depth (default 8)")
     ap.add_argument("--exp-comp", type=parse_exp_comp, default=0.0,
                     help="exposure compensation in EV for TIFF/JPEG, -5..5 (default 0.0)")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="byte-reproducible TIFF/JPEG: pin the SDK's rand()-seeded dither "
+                         "(needs rand_freeze.dylib from build.sh; same look, stable bytes)")
     ap.add_argument("--dng-engine", choices=("dnglab", "adobe"), default="dnglab",
                     help="DNG backend (default dnglab; adobe needs the app installed)")
     ap.add_argument("--dng-embed-original", action="store_true",
@@ -586,6 +590,7 @@ def main():
 
     # Validate only what the chosen format needs.
     icc = b""
+    args.render_env = None
     if needs_raster(args):
         if not args.render_bin.exists():
             sys.exit(f"render helper not found: {args.render_bin}\n  build it: bash {HERE/'build.sh'}")
@@ -595,8 +600,15 @@ def main():
         args.exiftool = shutil.which("exiftool")
         if not args.exiftool:
             log("warning: outputs will carry no EXIF — brew install exiftool")
+        if args.deterministic:
+            lib = args.render_bin.with_name("rand_freeze.dylib")
+            if not lib.exists():
+                sys.exit(f"--deterministic needs {lib}\n  re-run: bash {HERE/'build.sh'}")
+            args.render_env = {**os.environ, "DYLD_INSERT_LIBRARIES": str(lib)}
     else:
         args.exiftool = None
+        if args.deterministic:
+            log("note: --deterministic only affects TIFF/JPEG; DNG is already reproducible")
     args.dng_bin = resolve_dng_engine(args) if "dng" in args.formats else None
 
     if args.once:

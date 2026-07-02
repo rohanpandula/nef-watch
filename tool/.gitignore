@@ -1,4 +1,6 @@
 # Build artifacts + staged SDK runtime (reproducible via build.sh)
 nef_render
+rand_freeze.dylib
 *.o
+*.dylib
 Contents/
