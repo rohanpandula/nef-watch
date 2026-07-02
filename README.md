@@ -230,22 +230,27 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 - Orientation on TIFF/JPEG output is always normalized to `1` — the pixels are
   already rotated to display orientation by the SDK, so this is correct, but it
   means the output's Orientation tag does not simply mirror the source NEF's.
-- **Some NEFs are not bit-reproducible run to run** through the SDK: two renders
-  of the same file can differ by MAE ≈ 5/255 (max ≈ 35) in a fine, noise-like
-  pattern across the whole frame — visually identical, but don't build
-  byte-equality checks on rendered output. Root cause (traced by symbol
-  interposition): the SDK drives a **dithering stage from the C library's
-  `rand()`, seeded non-deterministically each run**, so the dither pattern
-  changes every render. It's applied only on some render paths — many files are
-  perfectly stable — and which path a file takes depends on its in-camera tone
-  processing (adaptive tone / Active D-Lighting-style stages), not on the lens,
-  Picture Control, ISO, or firmware (each of those was ruled out with
-  same-setting files landing on both sides). Freezing `rand()` via
-  `DYLD_INSERT_LIBRARIES` makes output byte-identical with no change in
-  appearance or accuracy vs NX Studio, confirming the dither as the sole source.
-  **Pass `--deterministic`** to enable exactly this (it injects the
-  `rand_freeze.dylib` that `build.sh` builds) when you need byte-stable output —
-  for regression tests, content-addressed storage, or reproducible pipelines.
+- **Some NEFs render slightly differently every time** (not bit-reproducible).
+  Convert the same file twice and the two outputs won't be a byte-for-byte match
+  — they differ by a fine, invisible speckle across the frame (MAE ≈ 5/255, max
+  ≈ 35). You can't see it; it only matters if you rely on the files being
+  *exactly* identical (hash checks, deduplication, reproducible pipelines).
+
+  *What causes it:* Nikon's SDK adds a little intentional **dither** — the same
+  trick newspapers use to print smooth gray skies out of tiny dots; a controlled
+  speckle that stops smooth areas from banding. The SDK picks that speckle
+  pattern from the C library's `rand()`, **re-seeded from the clock on every
+  run**, so it lands differently each time. (Traced by interposing `rand()`:
+  forcing a fixed sequence makes two renders byte-identical, with no change in
+  look or accuracy vs NX Studio — proving the dither is the sole cause.) It's
+  applied only on some files — many are perfectly stable — and which ones get it
+  tracks the shot's in-camera tone processing (adaptive-tone / Active
+  D-Lighting-style stages). It is **not** the lens, Picture Control, ISO, or
+  firmware: each was ruled out by finding same-setting files on both sides.
+
+  *The fix:* pass **`--deterministic`** to pin the dither to a fixed pattern, so
+  the same NEF always produces the same bytes. Identical look, just reproducible.
+  (It injects the small `rand_freeze.dylib` that `build.sh` builds.)
 
 ## License
 
