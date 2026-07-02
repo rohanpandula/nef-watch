@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  nef-watch LaunchAgent template.
+
+  Install:
+    cp contrib/com.nef-watch.plist ~/Library/LaunchAgents/
+    # edit every /REPLACE/... placeholder below, then:
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.nef-watch.plist
+
+  Remove:
+    launchctl bootout gui/$UID ~/Library/LaunchAgents/com.nef-watch.plist
+
+  See the "Run unattended (launchd)" section of the top-level README for details.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.nef-watch</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>python3</string>
+		<!-- Absolute path to nef_watch.py in your nef-watch checkout -->
+		<string>/REPLACE/WITH/ABSOLUTE/PATH/tool/nef_watch.py</string>
+		<!-- Folder to watch for incoming NEFs -->
+		<string>/REPLACE/WATCH/FOLDER</string>
+		<string>--out</string>
+		<!-- Folder to write converted output into -->
+		<string>/REPLACE/OUTPUT/FOLDER</string>
+		<string>--log-file</string>
+		<!-- Where nef-watch appends its own timestamped log lines -->
+		<string>/Users/REPLACE/Library/Logs/nef-watch.log</string>
+	</array>
+
+	<!-- Start on load (i.e. on login / bootstrap) -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart automatically if the process exits -->
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- stdout/stderr from launchd itself — separate from --log-file above -->
+	<key>StandardOutPath</key>
+	<string>/Users/REPLACE/Library/Logs/nef-watch.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/REPLACE/Library/Logs/nef-watch.err.log</string>
+</dict>
+</plist>

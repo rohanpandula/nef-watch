@@ -7,7 +7,7 @@ Batch-convert Nikon **NEF** raw files to **TIFF** with Nikon's native in-camera
 rendering baked in — the same look NX Studio produces — by driving Nikon's own
 **NEF/NRW Image SDK** headlessly. Point it at a folder and it watches for new NEFs
 and converts them; or run it once over a folder you already have. It can also
-transcode NEF → **DNG**.
+produce **JPEG** for sharing, and transcode NEF → **DNG**.
 
 Lightroom and Capture One don't match Nikon's color, and NX Studio has no command
 line. `nef-watch` uses Nikon's actual rendering engine, so the output matches NX
@@ -18,19 +18,33 @@ visually indistinguishable — see [Validation](#validation)).
 
 - **Nikon's in-camera look**, headless — Picture Control, white balance, Active
   D-Lighting applied exactly as the camera/NX Studio would, with no GUI.
-- **Watch mode** — drop NEFs into a folder, get TIFFs out, unattended.
+- **Watch mode** — drop NEFs into a folder, get TIFFs out, unattended. A failed
+  render is retried (up to 3×, with backoff) instead of being blacklisted, and
+  a file that fails while still uploading (e.g. mid-FTP) is retried immediately
+  once its size/mtime settle. Give-ups are logged clearly and re-armed if the
+  file changes later.
 - **Batch mode** — convert an existing folder in one shot.
-- **TIFF or DNG** — `--format tiff` (rendered, Nikon look) and/or `--format dng`
-  (raw transcode, editable, via dnglab or Adobe DNG Converter).
+- **TIFF, JPEG, and/or DNG** — `--format tiff` (rendered, Nikon look),
+  `--format jpeg` (rendered, smaller, for share/gallery use), and/or
+  `--format dng` (raw transcode, editable, via dnglab or Adobe DNG Converter).
+  Combine any of them: `--format tiff,jpeg`.
+- **EXIF carried over** — GPS and makernotes from the source NEF are copied onto
+  every TIFF/JPEG output (via exiftool).
+- **Recursive watch mirrors the input tree** — with `-r`, output subfolders match
+  input subfolders, so same-named files from different folders don't collide.
 - **Parallel**, **idempotent** (skips already-converted files), and **atomic**
-  (no half-written outputs on Ctrl-C).
-- Output is 8-bit (or 16-bit) LZW TIFF with the Nikon sRGB profile embedded —
-  byte-for-byte the format NX Studio writes.
+  (no half-written outputs on Ctrl-C). In `--once` mode, Ctrl-C finishes
+  in-flight conversions, cancels the rest, and prints a partial summary.
+- Output is 8-bit (or 16-bit) LZW TIFF (or JPEG) with the Nikon sRGB profile
+  embedded — the same render NX Studio produces, now with the source NEF's EXIF
+  carried over too.
 
-## TIFF or DNG — which do I want?
+## TIFF, JPEG, or DNG — which do I want?
 
-- **TIFF** — the finished photo *with* the Nikon look (what NX Studio produces).
-  Most people want this.
+- **TIFF** — the finished photo *with* the Nikon look (what NX Studio produces),
+  lossless. Most people want this for archival/editing.
+- **JPEG** — the same rendered look, much smaller. Good for sharing, galleries,
+  or anywhere you don't need a lossless master.
 - **DNG** — the raw, for re-editing later. It does **not** carry the Nikon look:
   opened in Lightroom / Apple Photos / Capture One it renders with *their* color
   science, so **it will look different from NX Studio** — the exact mismatch this
@@ -40,11 +54,16 @@ visually indistinguishable — see [Validation](#validation)).
 
 A small C++/Objective-C++ helper (`nef_render`) links Nikon's `libImgSDK.dylib`
 and renders a NEF to a pixel buffer using `DevelopColorMode = AppliedInCamera`
-(the camera-matched pipeline). A Python CLI (`nef_watch.py`) handles folder
-watching, batching, parallelism, and encodes the TIFF (Pillow) or routes the NEF
-to a DNG transcoder. DNG conversion does **not** use the SDK — it preserves the
-raw sensor data and therefore does not bake in the Nikon look (that's the TIFF
-path's job).
+(the camera-matched pipeline), with `--exp-comp` applied during that develop if
+given. A Python CLI (`nef_watch.py`) handles folder watching, batching,
+parallelism, and encodes the TIFF/JPEG (Pillow) or routes the NEF to a DNG
+transcoder. Orientation on rendered output is normalized to `1`, because the SDK
+already emits display-oriented, pre-rotated pixels — leaving the EXIF tag at its
+original value would double-rotate the image in viewers that respect it. If
+`exiftool` is installed, the source NEF's full EXIF (GPS, makernotes included) is
+then copied onto the output. DNG conversion does **not** use the SDK — it
+preserves the raw sensor data and therefore does not bake in the Nikon look
+(that's the TIFF/JPEG path's job).
 
 ## Requirements
 
@@ -53,23 +72,45 @@ path's job).
   <https://sdk.nikonimaging.com/> (free, application required). It is proprietary
   and **not** redistributed here. Point the build at it via `SDK_DIR` (see below).
 - **Xcode command-line tools** (`clang++`).
-- **Python 3** with `pillow` and `numpy` (`tifffile` only for `--bits 16`).
+- **Python 3.9+** with `pillow` and `numpy` (`tifffile` only for `--bits 16`).
+- **exiftool** (recommended) — `brew install exiftool`. Without it, `nef-watch`
+  warns once at startup and outputs carry no EXIF (the render itself is
+  unaffected).
 - For DNG: **dnglab** (`brew install dnglab`, default) or **Adobe DNG Converter**
   (`brew install --cask adobe-dng-converter`, for `--dng-engine adobe`).
+
+On Homebrew/system Python, `pip install` may refuse with an "externally managed
+environment" error (PEP 668). Use a venv, `pipx`, `uv pip install`, or skip the
+install step entirely with `uv run` (below).
 
 ## Installation
 
 ```bash
 git clone https://github.com/rohanpandula/nef-watch.git
 cd nef-watch
-pip install pillow numpy tifffile
 
 # Build the SDK render helper. Point SDK_DIR at your unpacked Nikon Image SDK:
 SDK_DIR="/path/to/Image SDK/Library/Mac" bash tool/build.sh
 ```
 
-`build.sh` compiles `nef_render` and stages the SDK's required `prm.bin` resource
-next to it. DNG-only use needs neither the SDK nor this build step.
+`build.sh` compiles `nef_render` and stages two SDK resources next to it: the
+required `prm.bin` runtime resource, and the `NKsRGB.icm` profile that becomes
+`nef_watch.py`'s default `--profile` (no more machine-specific default — it just
+works after a build). DNG-only use needs neither the SDK nor this build step.
+
+For the Python side, either install dependencies normally:
+
+```bash
+pip install pillow numpy tifffile
+```
+
+or skip that entirely — `nef_watch.py` carries inline PEP 723 script metadata, so
+[`uv`](https://github.com/astral-sh/uv) resolves and runs it in an ephemeral
+environment with zero setup:
+
+```bash
+uv run tool/nef_watch.py ~/Incoming --out ~/Exports
+```
 
 ## Usage
 
@@ -80,27 +121,79 @@ tool/nef_watch.py ~/Incoming --out ~/Exports
 # One-shot: convert everything already in a folder, then exit
 tool/nef_watch.py ~/Shoot --out ~/Shoot/tiff --once
 
+# JPEG instead of / in addition to TIFF
+tool/nef_watch.py ~/Shoot --out ~/jpg --once --format jpeg --quality 90
+tool/nef_watch.py ~/Shoot --out ~/out --once --format tiff,jpeg
+
 # DNG instead of / in addition to TIFF
 tool/nef_watch.py ~/Shoot --out ~/dng --once --format dng
-tool/nef_watch.py ~/Shoot --out ~/out --once --format both
+tool/nef_watch.py ~/Shoot --out ~/out --once --format tiff,dng
+
+# Convert a single file (no folder needed)
+tool/nef_watch.py ~/Shoot/DSC_0001.NEF --out ~/Shoot/tiff --once
+
+# .NRW (Coolpix raw) is matched everywhere .NEF is — no separate flag
+tool/nef_watch.py ~/Shoot --out ~/Shoot/tiff --once
 ```
 
 ### Options
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `input` (positional) | — | folder to watch / scan for `.NEF` |
+| `input` (positional) | — | folder to watch/scan, or a single `.NEF`/`.NRW` file to convert once |
 | `--out`, `-o` | *(required)* | output folder |
-| `--format` | `tiff` | `tiff` (Nikon look), `dng` (raw transcode), or `both` |
-| `--once` | off | convert existing NEFs once, then exit (default: keep watching) |
+| `--format` | `tiff` | comma-separated: any of `tiff`, `jpeg`, `dng` (e.g. `tiff,dng`); `both` = legacy alias for `tiff,dng` |
+| `--quality` | `90` | JPEG quality (1–100) |
+| `--once` | off | convert existing files once, then exit |
 | `--jobs`, `-j` | `4` | parallel workers |
 | `--bits {8,16}` | `8` | TIFF bit depth |
-| `--dng-engine` | `dnglab` | DNG backend: `dnglab` or `adobe` |
-| `--dng-embed-original` | off | embed the original NEF inside the DNG (much larger) |
-| `--recursive`, `-r` | off | scan subfolders too |
-| `--overwrite` | off | re-convert even if the output exists |
+| `--exp-comp` | `0.0` | exposure compensation in EV applied during the SDK develop (tiff/jpeg) |
+| `--dng-engine` | `dnglab` | `dnglab` or `adobe` |
+| `--dng-embed-original` | off | embed the original NEF inside the DNG |
+| `--recursive`, `-r` | off | scan subfolders; output mirrors the input folder structure |
+| `--overwrite` | off | re-convert even if outputs exist |
 | `--interval` | `3.0` | watch poll interval (seconds) |
-| `--profile` | Nikon sRGB | output ICC profile |
+| `--profile` | staged Nikon sRGB | ICC profile; default `tool/Contents/Resources/NKsRGB.icm` (staged by `build.sh`), falls back to the SDK path |
+| `--log-file` | — | also append timestamped log lines to this file |
+| `--render-bin` | `tool/nef_render` | path to the render helper |
+
+## Run unattended (launchd)
+
+To run `nef-watch` continuously in the background — surviving logout/login and
+restarting itself if it crashes — install it as a
+[launchd](https://www.launchd.info/) LaunchAgent:
+
+```bash
+cp contrib/com.nef-watch.plist ~/Library/LaunchAgents/
+```
+
+Edit the placeholders in `~/Library/LaunchAgents/com.nef-watch.plist` (marked
+with XML comments): the absolute path to `nef_watch.py`, the watch folder, the
+output folder, and your `--log-file` path. Then load it:
+
+```bash
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.nef-watch.plist
+```
+
+To stop and unload it:
+
+```bash
+launchctl bootout gui/$UID ~/Library/LaunchAgents/com.nef-watch.plist
+```
+
+(On older macOS, or if `bootstrap`/`bootout` aren't available, the legacy
+equivalents are `launchctl load -w` / `launchctl unload -w` on the same plist
+path.)
+
+Two independent log streams land in `~/Library/Logs/`: `nef-watch.log` (the
+app's own timestamped conversion log, from `--log-file` in the plist) and
+`nef-watch.out.log` / `nef-watch.err.log` (raw stdout/stderr captured by
+launchd itself — useful if the process fails before it even gets to logging).
+
+If the watched folder is a network mount (e.g. an SMB share) that drops, the
+watcher doesn't exit — it warns, keeps polling, and logs recovery once the
+mount reappears, so the LaunchAgent doesn't need `KeepAlive` to survive a
+flaky mount.
 
 ## Validation
 
@@ -124,7 +217,12 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 - macOS + Apple Silicon only; Nikon bodies supported by Image SDK v1.46.
 - The build bakes the SDK's `Lib/release` path into the helper's `@rpath`; re-run
   `build.sh` if you move the SDK.
-- DNG carries no Nikon look by design — use TIFF for the finished render.
+- DNG carries no Nikon look by design — use TIFF/JPEG for the finished render.
+- EXIF carry-over requires `exiftool` on `PATH`; without it, TIFF/JPEG outputs
+  have no EXIF at all (not even the basics Pillow would otherwise write).
+- Orientation on TIFF/JPEG output is always normalized to `1` — the pixels are
+  already rotated to display orientation by the SDK, so this is correct, but it
+  means the output's Orientation tag does not simply mirror the source NEF's.
 
 ## License
 

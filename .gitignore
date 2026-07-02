@@ -4,12 +4,15 @@ Image SDK/
 
 # Personal photos / test data
 testimages/
+tmp-test/
 *.zip
 *.NEF
 *.nef
 *.tif
 *.TIF
 *.dng
+*.jpg
+*.jpeg
 
 # Build artifacts
 tool/nef_render
