@@ -223,6 +223,12 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 - Orientation on TIFF/JPEG output is always normalized to `1` — the pixels are
   already rotated to display orientation by the SDK, so this is correct, but it
   means the output's Orientation tag does not simply mirror the source NEF's.
+- Renders of NEFs shot on **native Z lenses are not bit-reproducible run to run**:
+  the SDK's mandatory distortion-correction resample is thread-scheduling
+  dependent (measured MAE ≈ 4.8/255, max ≈ 34 between two renders of the same
+  file — visually identical, but don't expect byte-equal outputs). Third-party
+  lenses without correction profiles (no distortion correction applied) render
+  deterministically.
 
 ## License
 
