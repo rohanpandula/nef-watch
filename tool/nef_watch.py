@@ -37,13 +37,15 @@ Image.MAX_IMAGE_PIXELS = None
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_RENDER_BIN = HERE / "nef_render"
-DEFAULT_SDK = Path("/Users/rohan/Downloads/nx-tiffexport/Image SDK/Library/Mac")
 STAGED_PROFILE = HERE / "Contents" / "Resources" / "NKsRGB.icm"
-DEFAULT_PROFILE = STAGED_PROFILE if STAGED_PROFILE.exists() else DEFAULT_SDK / "Profiles" / "NKsRGB.icm"
+DEFAULT_PROFILE = STAGED_PROFILE
 RAW_SUFFIXES = {".nef", ".nrw"}
 FORMAT_ORDER = ("tiff", "jpeg", "dng")
 RASTER_FORMATS = {"tiff", "jpeg"}
 EXTS = {"tiff": ".tif", "jpeg": ".jpg", "dng": ".dng"}
+MAX_RENDER_PIXELS = 100_000_000
+MAX_RENDER_BYTES = 800_000_000
+MAX_NKRAW_HEADER = 256
 LOG_FILE = None
 LOG_LOCK = threading.Lock()
 
@@ -119,19 +121,29 @@ def needs_raster(args):
 
 def read_nkraw(path):
     with open(path, "rb") as f:
-        header = bytearray()
-        while not header.endswith(b"\n"):
-            b = f.read(1)
-            if not b:
-                raise ValueError("truncated raw (no header)")
-            header += b
-        parts = header.decode("ascii").split()
-        if parts[0] != "NKRAW1":
+        header = f.readline(MAX_NKRAW_HEADER + 1)
+        if not header.endswith(b"\n") or len(header) > MAX_NKRAW_HEADER:
+            raise ValueError("invalid or oversized NKRAW1 header")
+        try:
+            parts = header.decode("ascii").split()
+        except UnicodeDecodeError as e:
+            raise ValueError("NKRAW1 header is not ASCII") from e
+        if len(parts) != 6 or parts[0] != "NKRAW1":
             raise ValueError(f"bad raw magic: {parts[:1]}")
-        w, h, ch, depth, orient = (int(x) for x in parts[1:6])
-        data = f.read()
-    if len(data) != w * h * ch * depth:
-        raise ValueError(f"raw payload {len(data)} != {w*h*ch*depth}")
+        try:
+            w, h, ch, depth, orient = (int(x) for x in parts[1:6])
+        except ValueError as e:
+            raise ValueError("NKRAW1 header contains a non-integer field") from e
+        if w <= 0 or h <= 0 or w * h > MAX_RENDER_PIXELS:
+            raise ValueError(f"unsafe NKRAW1 dimensions: {w}x{h}")
+        if ch not in (1, 3, 4) or depth not in (1, 2):
+            raise ValueError(f"unsupported NKRAW1 format: channels={ch} depth={depth}")
+        expected = w * h * ch * depth
+        if expected > MAX_RENDER_BYTES:
+            raise ValueError(f"NKRAW1 payload exceeds safety limit: {expected} bytes")
+        data = f.read(expected + 1)
+    if len(data) != expected:
+        raise ValueError(f"raw payload {len(data)} != {expected}")
     dt = "<u2" if depth == 2 else "u1"
     arr = np.frombuffer(data, dtype=dt).reshape(h, w, ch)
     # GetImageData returns display-oriented pixels (validated in spike 001), so the
@@ -301,11 +313,11 @@ def expected_outputs(nef, args, out_dir):
             for kind in FORMAT_ORDER if kind in args.formats]
 
 
-def convert_one(nef, out_dir, args, icc):
+def convert_one(nef, out_dir, args, icc, force=False):
     """Produce the requested output(s) for one NEF. Returns (status, detail) with
     status in {ok,skip,error}. Safe to run concurrently."""
     wanted = expected_outputs(nef, args, out_dir)
-    todo = [(kind, p) for kind, p in wanted if args.overwrite or not p.exists()]
+    todo = [(kind, p) for kind, p in wanted if force or args.overwrite or not p.exists()]
     if not todo:
         return "skip", "exists"
     t0 = time.time()
@@ -314,6 +326,12 @@ def convert_one(nef, out_dir, args, icc):
         warn_if_bad_magic(nef)
         raster_todo = [(kind, p) for kind, p in todo if kind in RASTER_FORMATS]
         if raster_todo:
+            input_bytes = nef.stat().st_size
+            if input_bytes > args.max_input_bytes:
+                raise RuntimeError(
+                    f"input is {input_bytes / (1024 * 1024):.1f} MiB; "
+                    f"limit is {args.max_input_mib} MiB (--max-input-mib to override)"
+                )
             render_raster(nef, raster_todo, args, icc)
             made.extend(p.suffix for _, p in raster_todo)
         for kind, outp in todo:
@@ -337,8 +355,8 @@ def find_nefs(path, recursive):
     return sorted(seen)
 
 
-def _submit(ex, nef, args, out_dir, icc):
-    return ex.submit(convert_one, nef, out_dir, args, icc)
+def _submit(ex, nef, args, out_dir, icc, force=False):
+    return ex.submit(convert_one, nef, out_dir, args, icc, force)
 
 
 def run_once(args, out_dir, icc):
@@ -407,13 +425,23 @@ def outputs_complete(nef, args, out_dir):
     return all(path.exists() for _, path in expected_outputs(nef, args, out_dir))
 
 
+def processed_source_state(processed_key, current_key, complete):
+    """Classify an already-seen source without conflating missing outputs with edits."""
+    if processed_key is None:
+        return "new"
+    if processed_key != current_key:
+        return "source-changed"
+    return "complete" if complete else "output-missing"
+
+
 def run_watch(args, out_dir, icc):
     log(f"watching {args.input}  ->  {out_dir}   "
         f"(every {args.interval}s, {args.jobs} parallel, Ctrl-C to stop)")
-    sizes = {}          # path -> last-seen size, for copy-completion stability
-    processed = set()
+    stable_keys = {}    # path -> last-seen (size, mtime_ns), for upload stability
+    processed = {}      # path -> (size, mtime_ns) that produced current outputs
+    force = set()       # changed sources whose existing outputs must be replaced
     failures = {}       # path -> attempts/size/mtime/next_retry_at/error
-    inflight = {}       # future -> nef
+    inflight = {}       # future -> (nef, submitted stat key, forced overwrite)
     n = 0
     unavailable = False
     ex = cf.ThreadPoolExecutor(max_workers=args.jobs)
@@ -439,22 +467,47 @@ def run_watch(args, out_dir, icc):
 
             now = time.time()
             for nef in nefs:
-                if nef in processed or nef in inflight.values():
-                    continue
-                if not args.overwrite and outputs_complete(nef, args, out_dir):
-                    processed.add(nef)
-                    failures.pop(nef, None)
+                if nef in {job[0] for job in inflight.values()}:
                     continue
                 try:
-                    size, mtime = stat_key(nef)
+                    key = stat_key(nef)
                 except OSError:
+                    continue
+                size, mtime = key
+
+                source_state = processed_source_state(
+                    processed.get(nef), key, outputs_complete(nef, args, out_dir)
+                )
+                if source_state != "new":
+                    if source_state == "complete":
+                        continue
+                    processed.pop(nef, None)
+                    failures.pop(nef, None)
+                    stable_keys[nef] = key
+                    if source_state == "source-changed":
+                        force.add(nef)
+                        log(
+                            f"source changed after conversion: {nef.name} — "
+                            "waiting for it to settle"
+                        )
+                    else:
+                        log(
+                            f"output missing for unchanged source: {nef.name} — "
+                            "regenerating only missing format(s)"
+                        )
+                    continue
+
+                if (not args.overwrite and nef not in force
+                        and outputs_complete(nef, args, out_dir)):
+                    processed[nef] = key
+                    failures.pop(nef, None)
                     continue
 
                 state = failures.get(nef)
                 if state:
                     if (size, mtime) != (state["size"], state["mtime"]):
                         failures.pop(nef, None)
-                        sizes[nef] = size
+                        stable_keys[nef] = key
                         log(f"retry 1/3 {nef.name} (file changed)")
                         continue
                     if state["attempts"] >= 3:
@@ -463,24 +516,42 @@ def run_watch(args, out_dir, icc):
                         continue
                     log(f"retry {state['attempts'] + 1}/3 {nef.name}")
 
-                # submit only once the file size has settled (done copying)
-                if sizes.get(nef) == size and size > 0:
-                    inflight[_submit(ex, nef, args, out_dir, icc)] = nef
-                sizes[nef] = size
+                # Submit only once both size and mtime have settled. Some upload
+                # clients preallocate the final size while still writing.
+                if stable_keys.get(nef) == key and size > 0:
+                    forced = nef in force
+                    future = _submit(ex, nef, args, out_dir, icc, force=forced)
+                    inflight[future] = (nef, key, forced)
+                stable_keys[nef] = key
             for fut in [f for f in inflight if f.done()]:
-                nef = inflight.pop(fut)
+                nef, submitted_key, forced = inflight.pop(fut)
                 n += 1
                 try:
                     status, detail = fut.result()
                 except Exception as e:
                     status, detail = "error", str(e)
                 if status == "ok":
-                    processed.add(nef)
-                    failures.pop(nef, None)
-                    log(f"  [{n}] {nef.name} -> {detail}")
+                    try:
+                        current_key = stat_key(nef)
+                    except OSError:
+                        current_key = None
+                    if current_key != submitted_key:
+                        processed.pop(nef, None)
+                        failures.pop(nef, None)
+                        force.add(nef)
+                        if current_key is not None:
+                            stable_keys[nef] = current_key
+                        log(f"  [{n}] {nef.name} -> source changed during conversion; rerender queued")
+                    else:
+                        processed[nef] = submitted_key
+                        failures.pop(nef, None)
+                        force.discard(nef)
+                        log(f"  [{n}] {nef.name} -> {detail}")
                 elif status == "skip":
-                    processed.add(nef)
+                    processed[nef] = submitted_key
                     failures.pop(nef, None)
+                    if forced:
+                        force.discard(nef)
                     log(f"  [{n}] {nef.name} -> skip (exists)")
                 elif status == "error":
                     try:
@@ -503,11 +574,11 @@ def run_watch(args, out_dir, icc):
             # prune bookkeeping for files that vanished from the watched folder,
             # so week-long sessions don't accumulate state for every file ever seen
             present = set(nefs)
-            active = set(inflight.values())
-            for d in (sizes, failures):
+            active = {job[0] for job in inflight.values()}
+            for d in (stable_keys, failures, processed):
                 for p in [p for p in d if p not in present and p not in active]:
                     del d[p]
-            processed &= present | active
+            force &= present | active
             time.sleep(args.interval)
     except KeyboardInterrupt:
         log("stopping, finishing in-flight conversions…")
@@ -553,7 +624,7 @@ def main():
                     help="exposure compensation in EV for TIFF/JPEG, -5..5 (default 0.0)")
     ap.add_argument("--deterministic", action="store_true",
                     help="byte-reproducible TIFF/JPEG: pin the SDK's rand()-seeded dither "
-                         "(needs rand_freeze.dylib from build.sh; same look, stable bytes)")
+                         "(native macOS renderer only; same look, stable bytes)")
     ap.add_argument("--dng-engine", choices=("dnglab", "adobe"), default="dnglab",
                     help="DNG backend (default dnglab; adobe needs the app installed)")
     ap.add_argument("--dng-embed-original", action="store_true",
@@ -561,6 +632,8 @@ def main():
     ap.add_argument("--recursive", "-r", action="store_true", help="scan subfolders too")
     ap.add_argument("--overwrite", action="store_true", help="re-convert even if the output already exists")
     ap.add_argument("--interval", type=float, default=3.0, help="watch poll interval in seconds (default 3)")
+    ap.add_argument("--max-input-mib", type=int, default=512,
+                    help="reject a NEF/NRW larger than this before invoking the SDK (default 512)")
     ap.add_argument("--profile", type=Path, default=DEFAULT_PROFILE, help="output ICC profile (default: Nikon sRGB)")
     ap.add_argument("--log-file", type=Path, help="also append timestamped log lines to this file")
     ap.add_argument("--render-bin", type=Path, default=DEFAULT_RENDER_BIN, help="path to the nef_render helper")
@@ -587,6 +660,9 @@ def main():
         sys.exit(f"input folder not found: {args.input}")
     if args.jobs < 1:
         args.jobs = 1
+    if args.max_input_mib < 1:
+        sys.exit("--max-input-mib must be at least 1")
+    args.max_input_bytes = args.max_input_mib * 1024 * 1024
 
     # Validate only what the chosen format needs.
     icc = b""
@@ -601,6 +677,9 @@ def main():
         if not args.exiftool:
             log("warning: outputs will carry no EXIF — brew install exiftool")
         if args.deterministic:
+            if sys.platform != "darwin":
+                sys.exit("--deterministic is only supported by the native macOS renderer; "
+                         "the unmodified Windows SDK under Wine has no supported interposer")
             lib = args.render_bin.with_name("rand_freeze.dylib")
             if not lib.exists():
                 sys.exit(f"--deterministic needs {lib}\n  re-run: bash {HERE/'build.sh'}")

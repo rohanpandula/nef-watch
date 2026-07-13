@@ -1,23 +1,23 @@
 # nef-watch
 
-![platform](https://img.shields.io/badge/platform-macOS%20·%20Apple%20Silicon-111)
+![platform](https://img.shields.io/badge/platform-macOS%20arm64%20·%20Linux%20amd64%20Docker-111)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
-Batch-convert Nikon **NEF** raw files to **TIFF** with Nikon's native in-camera
-rendering baked in — the same look NX Studio produces — by driving Nikon's own
+Batch-convert Nikon **NEF** raw files to **TIFF** with Nikon's in-camera
+rendering baked in — targeting the look NX Studio produces — by driving Nikon's own
 **NEF/NRW Image SDK** headlessly. Point it at a folder and it watches for new NEFs
 and converts them; or run it once over a folder you already have. It can also
 produce **JPEG** for sharing, and transcode NEF → **DNG**.
 
 Lightroom and Capture One don't match Nikon's color, and NX Studio has no command
-line. `nef-watch` uses Nikon's actual rendering engine, so the output matches NX
-Studio's own export to the 8-bit quantization floor (mean abs error ≈ 1.7/255,
-visually indistinguishable — see [Validation](#validation)).
+line. `nef-watch` uses Nikon's actual rendering engine, so the output is visually
+very close to NX Studio (mean abs error ≈ 1.7/255), but current exports are not
+pixel-identical — see [Validation](#validation).
 
 ## Features
 
-- **Nikon's in-camera look**, headless — Picture Control, white balance, Active
-  D-Lighting applied exactly as the camera/NX Studio would, with no GUI.
+- **Nikon's in-camera look**, headless — Picture Control, white balance, and
+  Active D-Lighting applied by Nikon's SDK, with no GUI.
 - **Watch mode** — drop NEFs into a folder, get TIFFs out, unattended. A failed
   render is retried (up to 3×, with backoff) instead of being blacklisted, and
   a file that fails while still uploading (e.g. mid-FTP) is retried immediately
@@ -36,13 +36,16 @@ visually indistinguishable — see [Validation](#validation)).
   (no half-written outputs on Ctrl-C). In `--once` mode, Ctrl-C finishes
   in-flight conversions, cancels the rest, and prints a partial summary.
 - Output is 8-bit (or 16-bit) LZW TIFF (or JPEG) with the Nikon sRGB profile
-  embedded — the same render NX Studio produces, now with the source NEF's EXIF
-  carried over too.
+  embedded and the source NEF's EXIF carried over. The current decoded-pixel
+  difference from NX Studio is measured in [Validation](#validation).
+- Inputs larger than 512 MiB and rendered rasters above 100 MP are rejected by
+  default before they can exhaust a long-running container; the input limit is
+  adjustable for a known-valid larger file.
 
 ## TIFF, JPEG, or DNG — which do I want?
 
-- **TIFF** — the finished photo *with* the Nikon look (what NX Studio produces),
-  lossless. Most people want this for archival/editing.
+- **TIFF** — the finished photo *with* the Nikon-rendered look, lossless. Most
+  people want this for archival/editing.
 - **JPEG** — the same rendered look, much smaller. Good for sharing, galleries,
   or anywhere you don't need a lossless master.
 - **DNG** — the raw, for re-editing later. It does **not** carry the Nikon look:
@@ -52,8 +55,8 @@ visually indistinguishable — see [Validation](#validation)).
 
 ## How it works
 
-A small C++/Objective-C++ helper (`nef_render`) links Nikon's `libImgSDK.dylib`
-and renders a NEF to a pixel buffer using `DevelopColorMode = AppliedInCamera`
+A small native helper (`nef_render`) loads Nikon's Image SDK and renders a NEF
+to a pixel buffer using `DevelopColorMode = AppliedInCamera`
 (the camera-matched pipeline), with `--exp-comp` applied during that develop if
 given. A Python CLI (`nef_watch.py`) handles folder watching, batching,
 parallelism, and encodes the TIFF/JPEG (Pillow) or routes the NEF to a DNG
@@ -67,17 +70,22 @@ preserves the raw sensor data and therefore does not bake in the Nikon look
 
 ## Requirements
 
-- **macOS on Apple Silicon** (the SDK ships universal; tested on Apple Silicon).
-- **Nikon NEF/NRW Image SDK v1.46+** — you must obtain this yourself from Nikon at
+- **macOS on Apple Silicon**, or **Linux x86-64 with Docker/Wine** (tested on
+  Unraid 7.3.1). Nikon does not ship or support a native Linux SDK; the Docker
+  path runs Nikon's unmodified Windows x64 SDK under Wine.
+- **Nikon NEF/NRW Image SDK v1.46.0** for the validated Docker baseline — you
+  must obtain this yourself from Nikon at
   <https://sdk.nikonimaging.com/> (free, application required). It is proprietary
   and **not** redistributed here. Point the build at it via `SDK_DIR` (see below).
-- **Xcode command-line tools** (`clang++`).
-- **Python 3.9+** with `pillow` and `numpy` (`tifffile` + `imagecodecs` only for `--bits 16`).
-- **exiftool** (recommended) — `brew install exiftool`. Without it, `nef-watch`
-  warns once at startup and outputs carry no EXIF (the render itself is
-  unaffected).
-- For DNG: **dnglab** (`brew install dnglab`, default) or **Adobe DNG Converter**
-  (`brew install --cask adobe-dng-converter`, for `--dng-engine adobe`).
+- Native macOS builds need **Xcode command-line tools** (`clang++`), **Python
+  3.9+** with the packages in `requirements.txt`, and optionally **ExifTool**
+  (`brew install exiftool`) for EXIF carry-over.
+- The Linux image bundles Python, TIFF/JPEG dependencies, Wine, Xvfb, and
+  ExifTool. Building it requires Docker with BuildKit and amd64 emulation when
+  the build host is Apple Silicon.
+- For DNG on macOS: **dnglab** (`brew install dnglab`, default) or **Adobe DNG
+  Converter** (`brew install --cask adobe-dng-converter`, for
+  `--dng-engine adobe`). DNG tooling is not bundled in the Linux image.
 
 On Homebrew/system Python, `pip install` may refuse with an "externally managed
 environment" error (PEP 668). Use a venv, `pipx`, `uv pip install`, or skip the
@@ -92,6 +100,16 @@ cd nef-watch
 # Build the SDK render helper. Point SDK_DIR at your unpacked Nikon Image SDK:
 SDK_DIR="/path/to/Image SDK/Library/Mac" bash tool/build.sh
 ```
+
+For Linux or Unraid, build a private image from the Windows SDK tree:
+
+```bash
+SDK_DIR="/path/to/Image SDK/Library/win" bash docker/build-image.sh
+```
+
+The SDK is supplied as a separate Docker build context and remains outside Git.
+See [Linux and Unraid Docker deployment](docs/DOCKER.md) for one-shot, watcher,
+Compose, private-SDK, and validation instructions.
 
 `build.sh` compiles `nef_render` and stages two SDK resources next to it: the
 required `prm.bin` runtime resource, and the `NKsRGB.icm` profile that becomes
@@ -135,7 +153,7 @@ tool/nef_watch.py ~/Shoot/DSC_0001.NEF --out ~/Shoot/tiff --once
 # .NRW (Coolpix raw) is matched everywhere .NEF is — no separate flag
 tool/nef_watch.py ~/Shoot --out ~/Shoot/tiff --once
 
-# Byte-reproducible output (pins the SDK's dither; same look)
+# Native macOS only: byte-reproducible output (pins the SDK's dither)
 tool/nef_watch.py ~/Shoot --out ~/tiff --once --deterministic
 ```
 
@@ -151,13 +169,14 @@ tool/nef_watch.py ~/Shoot --out ~/tiff --once --deterministic
 | `--jobs`, `-j` | `4` | parallel workers |
 | `--bits {8,16}` | `8` | TIFF bit depth |
 | `--exp-comp` | `0.0` | exposure compensation in EV applied during the SDK develop (tiff/jpeg) |
-| `--deterministic` | off | byte-reproducible TIFF/JPEG — pin the SDK's `rand()`-seeded dither (same look; see [Limitations](#limitations)) |
+| `--deterministic` | off | byte-reproducible TIFF/JPEG on native macOS — pin the SDK's `rand()`-seeded dither (same look; see [Limitations](#limitations)) |
 | `--dng-engine` | `dnglab` | `dnglab` or `adobe` |
 | `--dng-embed-original` | off | embed the original NEF inside the DNG |
 | `--recursive`, `-r` | off | scan subfolders; output mirrors the input folder structure |
 | `--overwrite` | off | re-convert even if outputs exist |
 | `--interval` | `3.0` | watch poll interval (seconds) |
-| `--profile` | staged Nikon sRGB | ICC profile; default `tool/Contents/Resources/NKsRGB.icm` (staged by `build.sh`), falls back to the SDK path |
+| `--max-input-mib` | `512` | reject larger NEF/NRW files before invoking the proprietary SDK; raise only for a known-valid larger file |
+| `--profile` | staged Nikon sRGB | ICC profile; default `tool/Contents/Resources/NKsRGB.icm` (staged from your SDK by `build.sh`) |
 | `--log-file` | — | also append timestamped log lines to this file |
 | `--render-bin` | `tool/nef_render` | path to the render helper |
 
@@ -204,13 +223,16 @@ flaky mount.
 
 ## Validation
 
-The TIFF output was checked against NX Studio's own exports of the same NEFs
-(Nikon Z f). Across multiple images the mean absolute error is **≈ 1.74 / 255**
-(max 7, PSNR 41.4 dB) — and that residual is *pure 8-bit requantization*, not a
-rendering difference: the SDK's 8-bit output is byte-identical to rounding its own
-16-bit render down to 8-bit, edge-correlation with the difference is ~0, and no
-sharpening/dither/LUT closes it. In other words, it sits at the theoretical
-quantization floor. Full method and numbers in [`docs/VALIDATION.md`](docs/VALIDATION.md).
+The TIFF output was checked against NX Studio's own exports of the same Nikon Z f
+NEFs. Across multiple images the mean absolute error is **≈ 1.74 / 255** (max 7,
+PSNR 41.4 dB), which is visually negligible but is a real decoded-pixel delta.
+An earlier claim that this was a pure 8-bit quantization effect was incorrect and
+has been retracted. Two supplied NX Studio exports of the same NEF also differ
+from each other (MAE ≈ 2.28/255, max 11); controlled native-8-bit, intent,
+quality, and color-process tests localize that mismatch to the 8-bit noise/dither
+realization but do not make it exact. The exact validator intentionally fails the
+current baseline; full method, current counts, and the macOS/Linux/Docker gate are in
+[`docs/VALIDATION.md`](docs/VALIDATION.md).
 
 ## Performance
 
@@ -221,7 +243,8 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 
 ## Limitations
 
-- macOS + Apple Silicon only; Nikon bodies supported by Image SDK v1.46.
+- Native mode is macOS/Apple Silicon. Linux support is an experimental private
+  `linux/amd64` Wine container; Nikon does not officially support this runtime.
 - The build bakes the SDK's `Lib/release` path into the helper's `@rpath`; re-run
   `build.sh` if you move the SDK.
 - DNG carries no Nikon look by design — use TIFF/JPEG for the finished render.
@@ -236,28 +259,33 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
   ≈ 35). You can't see it; it only matters if you rely on the files being
   *exactly* identical (hash checks, deduplication, reproducible pipelines).
 
-  *What causes it:* Nikon's SDK adds a little intentional **dither** — the same
-  trick newspapers use to print smooth gray skies out of tiny dots; a controlled
+  *What causes the run-to-run delta:* Nikon's SDK adds a little intentional
+  **dither** — the same trick newspapers use to print smooth gray skies out of
+  tiny dots; a controlled
   speckle that stops smooth areas from banding. The SDK picks that speckle
   pattern from the C library's `rand()`, **re-seeded from the clock on every
   run**, so it lands differently each time. (Traced by interposing `rand()`:
-  forcing a fixed sequence makes two renders byte-identical, with no change in
-  look or accuracy vs NX Studio — proving the dither is the sole cause.) It's
+  forcing a fixed sequence makes two native macOS renders byte-identical.) It's
   applied only on some files — many are perfectly stable — and which ones get it
   tracks the shot's in-camera tone processing (adaptive-tone / Active
   D-Lighting-style stages). It is **not** the lens, Picture Control, ISO, or
   firmware: each was ruled out by finding same-setting files on both sides.
 
-  *The fix:* pass **`--deterministic`** to pin the dither to a fixed pattern, so
-  the same NEF always produces the same bytes. Identical look, just reproducible.
-  (It injects the small `rand_freeze.dylib` that `build.sh` builds.)
+  *The repeatability fix:* on native macOS, pass **`--deterministic`** to pin the
+  dither to a fixed pattern, so the same NEF produces the same bytes. This only
+  addresses repeatability; it does not close or explain the NX Studio-to-SDK
+  delta. The option injects the small `rand_freeze.dylib` built by `build.sh` and
+  is intentionally unavailable in Docker.
 
 ## License
 
 MIT — see [LICENSE](LICENSE). This covers only this project's code. The Nikon
 Image SDK is Nikon's property under its own license; obtain and use it per Nikon's
 terms. DNG conversion relies on [dnglab](https://github.com/dnglab/dnglab) or
-Adobe DNG Converter, each under its own license.
+Adobe DNG Converter, each under its own license. The private Linux image also
+contains Debian-packaged Wine, Xvfb, ExifTool, and their dependencies, and it
+downloads Microsoft's Visual C++ Redistributable; those components retain their
+respective licenses and are not relicensed by this repository's MIT license.
 
 ## Acknowledgments
 

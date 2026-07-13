@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Build the nef_render helper and stage the SDK runtime resources next to it.
 #
-# Override the SDK location with: SDK_DIR=/path/to/Image\ SDK/Library/Mac bash build.sh
+# Supply the SDK location with: SDK_DIR=/path/to/Image\ SDK/Library/Mac bash build.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SDK="${SDK_DIR:-/Users/rohan/Downloads/nx-tiffexport/Image SDK/Library/Mac}"
+SDK="${SDK_DIR:-}"
+if [[ -z "$SDK" ]]; then
+  echo "ERROR: Set SDK_DIR to your 'Image SDK/Library/Mac' directory." >&2
+  exit 2
+fi
 SAMPLE="$SDK/Sample"
 LIBDIR="$SAMPLE/Lib/release"
 PROFILE="$SDK/Profiles/NKsRGB.icm"

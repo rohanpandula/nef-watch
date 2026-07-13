@@ -1,0 +1,11 @@
+# Linux/amd64 CPython 3.12 wheels used by the validated private image.
+# Regenerate hashes deliberately and rerun the full color baseline after any
+# version change. requirements.txt remains the portable macOS/dev input.
+pillow==12.3.0 \
+    --hash=sha256:78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91
+numpy==2.5.1 \
+    --hash=sha256:59fda5e192b570217ec2580c96f00e9a7e12ef6866a900eb089b62c1a32545ca
+tifffile==2026.6.1 \
+    --hash=sha256:0d7382d2769b855b81ce358528e2b40c16d48aa39031746efa81215205332a8d
+imagecodecs==2026.6.26 \
+    --hash=sha256:6e9e57171ce7cdf884e7d45d25427f77275321a0ddbd26941c5c90b242d2b597

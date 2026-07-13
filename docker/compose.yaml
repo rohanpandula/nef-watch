@@ -1,0 +1,57 @@
+services:
+  nef-watch:
+    image: ${IMAGE:-nef-watch:nikon-linux}
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      additional_contexts:
+        nikon-sdk: ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}
+      # Keep these synchronized with `user` so a new Wine volume is writable.
+      args:
+        NEF_WATCH_UID: ${PUID:-99}
+        NEF_WATCH_GID: ${PGID:-100}
+        NEF_WATCH_SDK_FINGERPRINT: ${SDK_FINGERPRINT:-unverified}
+        NEF_WATCH_SOURCE_FINGERPRINT: ${SOURCE_FINGERPRINT:-compose-direct-unverified}
+    container_name: nef-watch
+    restart: unless-stopped
+    network_mode: none
+    user: ${PUID:-99}:${PGID:-100}
+    mem_limit: ${MEMORY_LIMIT:-4g}
+    memswap_limit: ${MEMORY_LIMIT:-4g}
+    cpus: ${CPU_LIMIT:-4}
+    pids_limit: ${PIDS_LIMIT:-256}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    tmpfs:
+      # Four 16-bit renders can use about 584 MiB of temporary NKRAW buffers.
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g
+      - /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m
+      - /run:rw,noexec,nosuid,nodev,mode=0755,size=8m
+    environment:
+      NEF_WATCH_HEALTH_INPUT: /input
+      NEF_WATCH_HEALTH_OUTPUT: /output
+    volumes:
+      - ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}:/input:ro
+      - ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}:/output:rw
+      - wine-prefix:/var/lib/nef-watch:rw
+    command:
+      - /input
+      - --out
+      - /output
+      - --recursive
+      - --jobs
+      - ${JOBS:-4}
+      - --interval
+      - ${INTERVAL:-3}
+
+volumes:
+  wine-prefix:

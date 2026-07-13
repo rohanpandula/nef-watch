@@ -1,0 +1,33 @@
+.git
+.gitignore
+.DS_Store
+.ruff_cache/
+docker/.env
+**/__pycache__/
+*.py[cod]
+
+# Nikon SDK files are supplied only through the named `nikon-sdk` build context.
+Image SDK/
+nikon-sdk/
+**/prm.bin
+tool/Contents/
+
+# Native macOS and local build artifacts are not part of the Linux image.
+tool/nef_render
+tool/nef_render.exe
+tool/rand_freeze.dylib
+*.o
+
+# Photos and validation output must never enter the Docker build context.
+testimages/
+tmp-test/
+validation-output/
+*.NEF
+*.nef
+*.TIF
+*.tif
+*.tiff
+*.dng
+*.jpg
+*.jpeg
+*.zip

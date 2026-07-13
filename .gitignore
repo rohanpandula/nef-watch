@@ -16,8 +16,17 @@ tmp-test/
 
 # Build artifacts
 tool/nef_render
+tool/nef_render.exe
 tool/Contents/
 *.o
+
+# Local Docker/SDK staging and validation outputs
+nikon-sdk/
+validation-output/
+docker/.env
+.ruff_cache/
+__pycache__/
+*.py[cod]
 
 # macOS
 .DS_Store
