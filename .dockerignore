@@ -6,7 +6,7 @@ docker/.env
 **/__pycache__/
 *.py[cod]
 
-# Nikon SDK files are supplied only through the named `nikon-sdk` build context.
+# Nikon SDK files are runtime-mounted only and must never enter the build context.
 Image SDK/
 nikon-sdk/
 **/prm.bin

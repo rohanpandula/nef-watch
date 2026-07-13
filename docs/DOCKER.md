@@ -1,88 +1,125 @@
 # Linux and Unraid Docker deployment
 
-Nikon does not publish a native Linux Image SDK. `nef-watch` therefore keeps the
-Python watcher and TIFF encoder native Linux, while a small Windows console
-adapter loads Nikon's unmodified x64 Windows SDK under Wine. Xvfb supplies the
-headless display required by the SDK's Windows color-management calls.
+Nikon does not publish a native Linux Image SDK. `nef-watch` runs a small
+Windows adapter against Nikon's unmodified x64 SDK under Wine while the watcher
+and TIFF/JPEG encoder remain native Linux. Xvfb provides the headless display
+required by the SDK's Windows color-management calls.
 
-This path is `linux/amd64` only and is not an environment Nikon officially
-supports. It has been exercised on Unraid 7.3.1 with Nikon Image SDK 1.46. The
-SDK remains proprietary: build and retain the image privately, and do not commit
-the SDK files or push the resulting image to a public registry.
+The ready-to-run image is published for `linux/amd64`:
 
-## Build the private image
+```text
+ghcr.io/rohanpandula/nef-watch:linux-amd64
+```
 
-The build requires the Windows half of the Nikon Image SDK 1.46.0 download. It
-must contain:
+Users pull this image; they do not build it. The public image contains no Nikon
+headers, DLLs, profiles, or runtime data. You must obtain Nikon Image SDK 1.46.0
+yourself from <https://sdk.nikonimaging.com/> and use it under Nikon's terms.
+
+## How first start works
+
+Mount `Image SDK/Library/win` at `/nikon-sdk:ro` and a persistent Docker volume
+at `/var/lib/nef-watch`. On first start, the container:
+
+1. verifies the pinned manifest and SHA-256 of every required SDK file;
+2. confirms that `/nikon-sdk` is a read-only mount;
+3. compiles the open-source Windows adapter with MinGW;
+4. copies only the allowlisted Nikon runtime and profiles into the private
+   persistent volume; and
+5. initializes Wine and starts the watcher.
+
+The staged runtime is keyed by the SDK manifest, adapter source, and compiler.
+Normal restarts reuse it without compiling again. An image update that changes
+the adapter creates a new private runtime automatically. Concurrent first starts
+are serialized, and incomplete staging directories are never activated.
+
+The persistent state volume contains Nikon's licensed files after first start.
+Do not publish, export, or attach that volume to an image.
+
+## Prepare the Nikon SDK and folders
+
+The mounted directory must have this layout:
 
 ```text
 Image SDK/Library/win/
 ├── Include/Nkfl_Interface.h
 ├── Bin/x64/Release/NkImgSDK.dll
 ├── Bin/x64/Release/{Elm.dll,Elm.nlf,RCSigProc.dll,tbb.dll,tbbmalloc.dll,prm.bin}
-└── Profiles/                         # all 25 files are required
+└── Profiles/                         # all validated profile files
 ```
 
-BuildKit imports that directory as a separate named context. The SDK is never
-copied into the Git worktree or the normal Docker build context:
+The container runs as Unraid's standard `nobody:users` identity (`99:100`). The
+SDK must be readable and traversable by that identity, and the output directory
+must be writable. The SDK may be world-readable if that suits your server:
 
 ```bash
-cd /path/to/nef-watch
-SDK_DIR="/path/to/Image SDK/Library/win" \
-  IMAGE="nef-watch:nikon-linux" \
-  bash docker/build-image.sh
+chmod -R a+rX /mnt/user/Media/.nef-watch-build/nikon-sdk
+install -d -o 99 -g 100 /mnt/user/Media/Photos/Nikon-TIFF
 ```
 
-`build-image.sh` verifies every copied runtime/profile and rejects a package
-whose combined SHA-256 differs from the six-image v1.46.0 baseline. To test a
-new SDK deliberately, set `ALLOW_UNVALIDATED_SDK=1` and establish a new color
-baseline before deployment. The fingerprint is also stored on the image as
-`io.nef-watch.nikon-sdk.fingerprint`.
+Input can remain read-only. The watcher reads NEFs and copies EXIF but never
+modifies source files.
 
-For auditable, fail-closed builds, the Dockerfile pins its base-image digests,
-direct Debian package versions, and Python wheels by SHA-256. Transitive Debian
-packages still resolve from Debian's live repositories, so the resulting image
-ID—not the Dockerfile alone—is the immutable runtime identity. The script hashes
-the effective Docker/runtime source and writes that value to
-`io.nef-watch.source.fingerprint`; use the script rather than a direct
-`docker compose build` when recording a validation baseline. The image also
-contains `/usr/share/nef-watch/runtime-packages.tsv`, a complete installed
-Debian-package inventory. Any dependency or source-fingerprint change requires
-rerunning the color corpus before that image can replace a recorded baseline.
-The required x64 Visual C++ runtime is fetched from a fixed Microsoft URL with a
-pinned SHA-256 and installed into each new Wine volume; its hash is recorded as
-`io.nef-watch.vc-redist.sha256`. Keep this third-party runtime in the same
-private-image/licensed-use boundary as the Nikon SDK.
+## Recommended Compose setup
 
-For a remote Unraid build, first copy this repository and the private SDK tree to
-the server, then run the same command over SSH. If the staging location is under
-an exported share, keep the proprietary SDK directory root-only. On the validated
-host used for this project, the paths are:
-
-```text
-/mnt/user/Media/.nef-watch-build/repo
-/mnt/user/Media/.nef-watch-build/nikon-sdk
-```
-
-The validated server currently keeps the SDK path at mode `0700` and its files
-at mode `0600`. This is not required for rendering; it only controls who can
-read the proprietary build input on the host.
-
-## One-shot smoke test
-
-Use absolute Unraid host paths. Input may be mounted read-only; the Python layer
-copies EXIF from it but never modifies it. The image defaults to Unraid's
-`nobody:users` identity (`99:100`), so create the output with matching ownership
-and use a fresh Wine volume (or fix the ownership of an older root-owned one):
+Clone the repository only to obtain the Compose file and example settings; no
+local image build occurs:
 
 ```bash
-install -d -o 99 -g 100 /mnt/user/Photos/TIFF
-docker volume create nef-watch-wine
+git clone https://github.com/rohanpandula/nef-watch.git
+cd nef-watch
+cp docker/.env.example docker/.env
 ```
 
-Then run the same confinement used by Compose:
+Edit `docker/.env`:
+
+```dotenv
+NIKON_SDK_DIR=/mnt/user/Media/.nef-watch-build/nikon-sdk
+NEF_INPUT=/mnt/user/Photos/NEF
+NEF_OUTPUT=/mnt/user/Media/Photos/Nikon-TIFF
+IMAGE=ghcr.io/rohanpandula/nef-watch:linux-amd64
+JOBS=4
+INTERVAL=3
+MEMORY_LIMIT=4g
+CPU_LIMIT=4
+PIDS_LIMIT=256
+```
+
+Validate, pull, and start it:
 
 ```bash
+docker compose --project-directory docker config
+docker compose --project-directory docker pull
+docker compose --project-directory docker up -d
+docker compose --project-directory docker logs -f nef-watch
+```
+
+The first start takes longer while the adapter and Wine prefix are initialized.
+Look for `Nikon SDK runtime ready:` in the log. Subsequent starts use the same
+`nef-watch-state` volume.
+
+The Compose service publishes no ports and has no runtime network access. It
+runs as UID/GID `99:100`, drops every Linux capability, enables
+`no-new-privileges`, uses a read-only root filesystem, rotates logs, and limits
+CPU, memory, swap, and PID usage. Only temporary files, the output directory,
+and persistent state are writable.
+
+To update:
+
+```bash
+docker compose --project-directory docker pull
+docker compose --project-directory docker up -d
+```
+
+Keep the state volume. Deleting it removes both the staged Nikon runtime and the
+initialized Wine prefix, so the next start performs the full bootstrap again.
+
+## One-shot `docker run`
+
+For a batch conversion without Compose:
+
+```bash
+docker volume create nef-watch-state
+
 docker run --rm \
   --platform linux/amd64 \
   --user 99:100 \
@@ -91,104 +128,56 @@ docker run --rm \
   --memory-swap 4g \
   --cpus 4 \
   --pids-limit 256 \
-  --log-opt max-size=10m \
-  --log-opt max-file=3 \
   --read-only \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g \
   --tmpfs /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m \
   --tmpfs /run:rw,noexec,nosuid,nodev,mode=0755,size=8m \
-  -v nef-watch-wine:/var/lib/nef-watch \
+  -v /mnt/user/Media/.nef-watch-build/nikon-sdk:/nikon-sdk:ro \
+  -v nef-watch-state:/var/lib/nef-watch \
   -v /mnt/user/Photos/NEF:/input:ro \
-  -v /mnt/user/Photos/TIFF:/output \
-  nef-watch:nikon-linux \
+  -v /mnt/user/Media/Photos/Nikon-TIFF:/output:rw \
+  ghcr.io/rohanpandula/nef-watch:linux-amd64 \
   /input --out /output --once --recursive --jobs 4
 ```
 
-The `nef-watch-wine` volume preserves Wine's initialized prefix, avoiding the
-first-start setup cost on every container run.
-
-## Continuous watcher
+The CLI help does not need the SDK or persistent state:
 
 ```bash
-docker run -d \
-  --name nef-watch \
-  --restart unless-stopped \
-  --platform linux/amd64 \
-  --user 99:100 \
-  --network none \
-  --memory 4g \
-  --memory-swap 4g \
-  --cpus 4 \
-  --pids-limit 256 \
-  --log-opt max-size=10m \
-  --log-opt max-file=3 \
-  --read-only \
-  --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g \
-  --tmpfs /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m \
-  --tmpfs /run:rw,noexec,nosuid,nodev,mode=0755,size=8m \
-  -v nef-watch-wine:/var/lib/nef-watch \
-  -v /mnt/user/Photos/NEF:/input:ro \
-  -v /mnt/user/Media/Photos/Nikon-TIFF:/output \
-  nef-watch:nikon-linux \
-  /input --out /output --recursive --jobs 4 --interval 3
+docker run --rm ghcr.io/rohanpandula/nef-watch:linux-amd64 --help
 ```
 
-Change the two host paths to the folders you actually want watched and written.
-Do not point the output inside the input tree. Pre-create the output as UID 99,
-GID 100 as shown above. If you intentionally choose another Unraid identity,
-rebuild with matching `NEF_WATCH_UID`/`NEF_WATCH_GID` args and pass that same
-identity with `--user`.
+## SDK validation failures
 
-## Docker Compose
+This release accepts the exact Nikon Image SDK 1.46.0 Windows package used for
+the recorded color baseline. A missing or changed header, DLL, profile, or
+`prm.bin` fails closed before Wine starts. Check that the mounted path is the
+`Library/win` directory itself, that it is readable by UID 99, and that the bind
+mount includes `:ro`.
 
-Copy the example environment file, edit its host paths, build through the
-provenance-aware wrapper, and then start Compose without rebuilding:
+A newer Nikon SDK needs a reviewed manifest update and a fresh color baseline;
+there is no runtime flag that silently bypasses the pinned hashes.
+
+## Maintainer-only local build
+
+The published image is built without a Nikon SDK context. Maintainers can build
+the same SDK-free wrapper locally for testing:
 
 ```bash
-cp docker/.env.example docker/.env
-SDK_DIR="$(sed -n 's/^NIKON_SDK_DIR=//p' docker/.env)" \
-  IMAGE="$(sed -n 's/^IMAGE=//p' docker/.env)" \
-  PUID="$(sed -n 's/^PUID=//p' docker/.env)" \
-  PGID="$(sed -n 's/^PGID=//p' docker/.env)" \
-  bash docker/build-image.sh
-docker compose --project-directory docker up -d --no-build
-docker compose --project-directory docker logs -f nef-watch
+IMAGE=nef-watch:linux-amd64 bash docker/build-image.sh
 ```
 
-`docker compose build` remains available for local experimentation, but its
-source label is intentionally `compose-direct-unverified`; do not use a direct
-Compose build as a recorded validation baseline.
-
-Before `up`, pre-create `NEF_OUTPUT` with the `PUID`/`PGID` from `.env` (defaults
-to `99:100`). If an older named Wine volume was initialized as root, recreate it
-when no container is using it, or change its contents to the configured owner;
-otherwise startup exits with a clear unwritable-prefix error.
-
-The Compose service has no published ports or runtime network access. It also
-runs as a non-root user with Linux capabilities dropped, a read-only root
-filesystem, and only `/tmp`, the Wine volume, and the output mount writable. The
-defaults also cap it at 4 CPUs, 4 GiB of memory, and 256 PIDs. The Compose file
-requests a memory-plus-swap ceiling equal to the memory ceiling; on Unraid hosts
-without swap-controller support, Docker warns and enforces the memory limit
-without separate swap accounting. Override `CPU_LIMIT`, `MEMORY_LIMIT`, or
-`PIDS_LIMIT` in `.env` only after measuring a known-valid workload. Docker's
-JSON logs rotate at 10 MiB with three files, so a long-running watcher cannot
-fill Docker storage with unbounded logs.
-
-Keep the watched input private or authenticated when possible. A writable public
-drop folder lets any LAN client feed files to a proprietary parser. The container
-is isolated and resource-limited, and `nef-watch` rejects inputs above 512 MiB by
-default, but those are containment layers rather than a substitute for trusted
-input. Use `--max-input-mib` only for a known-valid larger NEF/NRW.
+The build wrapper records a canonical source fingerprint in the image label
+`io.nef-watch.source.fingerprint`. The image also records that the Nikon SDK is
+not bundled, the expected SDK-manifest fingerprint, and the pinned Visual C++
+Redistributable hash. GitHub Actions scans every candidate image layer against
+the Nikon manifest before it is allowed to publish to GHCR.
 
 ## Color validation
 
-Validate decoded RGB values and the embedded ICC profile rather than TIFF file
-bytes, since lossless compression and metadata layout can differ:
+Validate decoded RGB samples and the embedded ICC profile rather than TIFF file
+bytes, because lossless compression and metadata layout can differ:
 
 ```bash
 python3 tool/validate_tiffs.py \
@@ -197,25 +186,21 @@ python3 tool/validate_tiffs.py \
   linux=/validation/linux-docker.tif
 ```
 
-The validator is intentionally exact: any changed sample returns exit code 1.
-The current NX Studio-versus-native-Mac SDK baseline already fails this strict
-gate (MAE about 1.74/255, maximum 7), so Linux cannot make the four-way equality
-true without first resolving that pre-existing gap. Two supplied NX Studio
-exports of the same NEF also differ from each other (MAE about 2.28/255), which
-the controlled SDK matrix localizes to the 8-bit noise/dither realization. See
-[VALIDATION.md](VALIDATION.md).
+The validator is intentionally exact. The Docker runtime has reproduced its
+recorded Linux decoded pixels and Nikon sRGB ICC profile exactly. The broader
+NX Studio-versus-SDK gate remains red: repeated NX Studio exports themselves
+use different fine dither/noise, while the practical colors are visually the
+same. See [VALIDATION.md](VALIDATION.md) for the measurements and provenance.
 
 ## Current limitations
 
-- `--deterministic` is native-macOS-only. The Docker path deliberately does not
-  patch or interpose Nikon's Windows binary.
-- The image contains TIFF/JPEG dependencies and ExifTool, but not `dnglab` or
-  Adobe DNG Converter. Add a native Linux `dnglab` binary if DNG output is needed.
-- Nikon optional Picture Controls must be installed in the Wine prefix if a NEF
-  depends on one. Unlike Nikon's sample wrapper, `nef-watch` treats every
-  non-zero `OpenSession` warning as fatal: Nikon documents warning fallbacks
-  that substitute a different Picture Control or white-balance mode, which
-  would violate the exact-color contract. The documented `GetImageData` warning
-  that only declines a low-resolution optimization remains safe and accepted.
-- Keep the private Nikon SDK build context and resulting image on systems whose
-  users are authorized under Nikon's SDK agreement.
+- Nikon supports neither native Linux nor this Wine environment.
+- `--deterministic` is native-macOS-only; Docker does not patch Nikon's Windows
+  binary.
+- DNG output needs a separate Linux `dnglab` binary, which is not bundled.
+- Optional Picture Controls must be installed in the Wine prefix if a NEF
+  depends on one. SDK warnings that substitute a different Picture Control or
+  white-balance mode are treated as fatal because they violate the color
+  contract.
+- Keep the SDK mount, state volume, and source NEFs within the access boundary
+  allowed by their respective licenses and your privacy requirements.

@@ -76,13 +76,14 @@ preserves the raw sensor data and therefore does not bake in the Nikon look
 - **Nikon NEF/NRW Image SDK v1.46.0** for the validated Docker baseline — you
   must obtain this yourself from Nikon at
   <https://sdk.nikonimaging.com/> (free, application required). It is proprietary
-  and **not** redistributed here. Point the build at it via `SDK_DIR` (see below).
+  and **not** redistributed here. Mount its `Image SDK/Library/win` directory
+  read-only when the Linux container starts for the first time.
 - Native macOS builds need **Xcode command-line tools** (`clang++`), **Python
   3.9+** with the packages in `requirements.txt`, and optionally **ExifTool**
   (`brew install exiftool`) for EXIF carry-over.
-- The Linux image bundles Python, TIFF/JPEG dependencies, Wine, Xvfb, and
-  ExifTool. Building it requires Docker with BuildKit and amd64 emulation when
-  the build host is Apple Silicon.
+- The public Linux image bundles Python, TIFF/JPEG dependencies, Wine, Xvfb,
+  ExifTool, and the MinGW toolchain used for first-start adapter compilation.
+  It contains no Nikon SDK files.
 - For DNG on macOS: **dnglab** (`brew install dnglab`, default) or **Adobe DNG
   Converter** (`brew install --cask adobe-dng-converter`, for
   `--dng-engine adobe`). DNG tooling is not bundled in the Linux image.
@@ -101,15 +102,17 @@ cd nef-watch
 SDK_DIR="/path/to/Image SDK/Library/Mac" bash tool/build.sh
 ```
 
-For Linux or Unraid, build a private image from the Windows SDK tree:
+For Linux or Unraid, pull the ready-to-run SDK-free image; users do not build it:
 
 ```bash
-SDK_DIR="/path/to/Image SDK/Library/win" bash docker/build-image.sh
+docker pull ghcr.io/rohanpandula/nef-watch:linux-amd64
 ```
 
-The SDK is supplied as a separate Docker build context and remains outside Git.
-See [Linux and Unraid Docker deployment](docs/DOCKER.md) for one-shot, watcher,
-Compose, private-SDK, and validation instructions.
+At first start, mount your Nikon Windows SDK directory at `/nikon-sdk:ro` and a
+persistent Docker volume at `/var/lib/nef-watch`. The container verifies every
+SDK file, compiles the open wrapper, and stages the licensed runtime only in
+that private volume. See [Linux and Unraid Docker deployment](docs/DOCKER.md)
+for the complete `docker run` and Compose setup.
 
 `build.sh` compiles `nef_render` and stages two SDK resources next to it: the
 required `prm.bin` runtime resource, and the `NKsRGB.icm` profile that becomes
@@ -243,7 +246,7 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 
 ## Limitations
 
-- Native mode is macOS/Apple Silicon. Linux support is an experimental private
+- Native mode is macOS/Apple Silicon. Linux support is an experimental
   `linux/amd64` Wine container; Nikon does not officially support this runtime.
 - The build bakes the SDK's `Lib/release` path into the helper's `@rpath`; re-run
   `build.sh` if you move the SDK.
@@ -282,10 +285,11 @@ DNG transcoding is much faster (~0.5 s/file with dnglab).
 MIT — see [LICENSE](LICENSE). This covers only this project's code. The Nikon
 Image SDK is Nikon's property under its own license; obtain and use it per Nikon's
 terms. DNG conversion relies on [dnglab](https://github.com/dnglab/dnglab) or
-Adobe DNG Converter, each under its own license. The private Linux image also
-contains Debian-packaged Wine, Xvfb, ExifTool, and their dependencies, and it
-downloads Microsoft's Visual C++ Redistributable; those components retain their
-respective licenses and are not relicensed by this repository's MIT license.
+Adobe DNG Converter, each under its own license. The public Linux image contains
+Debian-packaged Wine, Xvfb, MinGW, ExifTool, and their dependencies, plus
+Microsoft's Visual C++ Redistributable. Those components retain their respective
+licenses and are not relicensed by this repository's MIT license. Nikon files
+are supplied by the user at runtime and remain in the user's private volume.
 
 ## Acknowledgments
 

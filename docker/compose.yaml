@@ -1,22 +1,11 @@
 services:
   nef-watch:
-    image: ${IMAGE:-nef-watch:nikon-linux}
+    image: ${IMAGE:-ghcr.io/rohanpandula/nef-watch:linux-amd64}
     platform: linux/amd64
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      additional_contexts:
-        nikon-sdk: ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}
-      # Keep these synchronized with `user` so a new Wine volume is writable.
-      args:
-        NEF_WATCH_UID: ${PUID:-99}
-        NEF_WATCH_GID: ${PGID:-100}
-        NEF_WATCH_SDK_FINGERPRINT: ${SDK_FINGERPRINT:-unverified}
-        NEF_WATCH_SOURCE_FINGERPRINT: ${SOURCE_FINGERPRINT:-compose-direct-unverified}
     container_name: nef-watch
     restart: unless-stopped
     network_mode: none
-    user: ${PUID:-99}:${PGID:-100}
+    user: 99:100
     mem_limit: ${MEMORY_LIMIT:-4g}
     memswap_limit: ${MEMORY_LIMIT:-4g}
     cpus: ${CPU_LIMIT:-4}
@@ -39,10 +28,12 @@ services:
     environment:
       NEF_WATCH_HEALTH_INPUT: /input
       NEF_WATCH_HEALTH_OUTPUT: /output
+      NIKON_SDK_DIR: /nikon-sdk
     volumes:
       - ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}:/input:ro
       - ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}:/output:rw
-      - wine-prefix:/var/lib/nef-watch:rw
+      - ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}:/nikon-sdk:ro
+      - nef-watch-state:/var/lib/nef-watch:rw
     command:
       - /input
       - --out
@@ -54,4 +45,4 @@ services:
       - ${INTERVAL:-3}
 
 volumes:
-  wine-prefix:
+  nef-watch-state:

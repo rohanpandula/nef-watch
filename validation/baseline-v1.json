@@ -9,8 +9,10 @@
     "nikon_sdk_manifest_sha256": "0e8aba70b296966c03c407c8dd77ddee5c073924b9fb38f988881c366a1fbc51",
     "macos": "26.5.2 (25F84), arm64",
     "linux_host": "Unraid 7.3.1, x86_64",
-    "docker_image_id": "sha256:f30cec14209424607f6326c2a35a0406edd83d2dfdbb8e4c4aa556cd3e54be1f",
-    "docker_source_fingerprint": "051fa221a5783fdf65c08f631fd1bd77330f02e4d74c52bfbe1d0f79b8b50060",
+    "docker_image_id": "sha256:85e3aa93db238068c75cb3a4b0891ab5af17adaa325077c3967827832ec08b80",
+    "docker_source_fingerprint": "ab44e257fd0707f16e705743022ac928a5113302da226cd2ffa1d4c4bc380d3f",
+    "docker_image_reference": "ghcr.io/rohanpandula/nef-watch:linux-amd64",
+    "docker_sdk_bootstrap": "schema v2; manifest-verified private snapshot; SDK not bundled in image",
     "vc_redist_sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b"
   },
   "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e",

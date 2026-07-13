@@ -102,16 +102,21 @@ from the recorded source hashes and the strict gate reaches zero differences.
 ### Current six-image baseline
 
 On 2026-07-13, `DSC_0722` through `DSC_0727` were rendered through the native
-macOS SDK and the private Linux/amd64 Wine image, then compared with their NX
+macOS SDK and the SDK-free Linux/amd64 Wine wrapper, then compared with their NX
 Studio references. Each artifact was 4032×6048 (width×height) RGB uint8 with
 Orientation 1 and
 the same Nikon sRGB ICC SHA-256
 `49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e`.
-The recorded Linux artifacts were reproduced exactly by final image
-`sha256:f30cec14209424607f6326c2a35a0406edd83d2dfdbb8e4c4aa556cd3e54be1f`
-(source fingerprint `051fa221a5783fdf65c08f631fd1bd77330f02e4d74c52bfbe1d0f79b8b50060`):
-all six decoded rasters and ICC profiles were byte-for-byte equal to the earlier
-Docker baseline.
+The recorded Linux artifacts were reproduced exactly by the public-wrapper
+candidate image
+`sha256:85e3aa93db238068c75cb3a4b0891ab5af17adaa325077c3967827832ec08b80`
+(source fingerprint `ab44e257fd0707f16e705743022ac928a5113302da226cd2ffa1d4c4bc380d3f`).
+Its image layers contain no Nikon SDK files. A fresh schema-v2 state volume
+validated a read-only SDK mount, compiled from a re-hashed private snapshot, and
+rendered all six NEFs under the production container restrictions. All
+`438,939,648` decoded samples and every ICC profile were exactly equal to the
+earlier Linux baseline (mean and maximum delta `0`). A restart reused that
+private state without the SDK mount and passed the container healthcheck.
 
 | Aggregate over six NEFs | macOS SDK vs NX | Docker/Wine SDK vs NX | Docker/Wine vs macOS SDK |
 |-------------------------|----------------:|-----------------------:|---------------------------:|

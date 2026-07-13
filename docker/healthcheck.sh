@@ -22,7 +22,16 @@ has_process_argument() {
 export DISPLAY="${DISPLAY:-:99}"
 export WINEPREFIX="${WINEPREFIX:-/var/lib/nef-watch/wine}"
 export NEF_WATCH_WINE_SCHEMA="${NEF_WATCH_WINE_SCHEMA:-vc14-cc0ff0eb1dc3}"
+export NIKON_RUNTIME_DIR="${NIKON_RUNTIME_DIR:-/var/lib/nef-watch/nikon-runtime/current}"
 
+[[ -r "$NIKON_RUNTIME_DIR/.nef-watch-sdk-ready.json" ]] \
+  || fail "private Nikon SDK runtime is not initialized"
+[[ -x "$NIKON_RUNTIME_DIR/nef_render.exe" ]] \
+  || fail "Nikon render adapter is missing"
+[[ -r "$NIKON_RUNTIME_DIR/NkImgSDK.dll" ]] \
+  || fail "Nikon runtime DLL is missing"
+[[ -r "$NIKON_RUNTIME_DIR/Profiles/NKsRGB.icm" ]] \
+  || fail "Nikon sRGB profile is missing"
 [[ -f "$WINEPREFIX/.nef-watch-ready-$NEF_WATCH_WINE_SCHEMA" ]] \
   || fail "Wine prefix initialization is incomplete"
 [[ -w "$WINEPREFIX" ]] \

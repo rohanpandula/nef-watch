@@ -1,4 +1,4 @@
-# Linux/amd64 CPython 3.12 wheels used by the validated private image.
+# Linux/amd64 CPython 3.12 wheels used by the validated public wrapper image.
 # Regenerate hashes deliberately and rerun the full color baseline after any
 # version change. requirements.txt remains the portable macOS/dev input.
 pillow==12.3.0 \

@@ -8,17 +8,34 @@ export WINEDEBUG="${WINEDEBUG:--all}"
 export HOME="${HOME:-/var/lib/nef-watch/home}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/nef-watch-runtime}"
 export NEF_WATCH_WINE_SCHEMA="${NEF_WATCH_WINE_SCHEMA:-vc14-cc0ff0eb1dc3}"
+export NEF_WATCH_STATE_DIR="${NEF_WATCH_STATE_DIR:-/var/lib/nef-watch}"
+export NIKON_SDK_DIR="${NIKON_SDK_DIR:-/nikon-sdk}"
+export NIKON_RUNTIME_DIR="${NIKON_RUNTIME_DIR:-$NEF_WATCH_STATE_DIR/nikon-runtime/current}"
+
+# Image introspection must work before a private SDK has been mounted or Wine
+# has been initialized.
+for argument in "$@"; do
+  if [[ "$argument" == "--help" || "$argument" == "-h" ]]; then
+    exec python3 /app/tool/nef_watch.py "$@"
+  fi
+done
 
 # Use Microsoft's native, mutually-compatible MSVC runtime set once installed.
 # Preserve caller overrides while making Nikon's required runtime explicit.
 runtime_overrides='winemenubuilder.exe=d;msvcp140=n,b;msvcp140_1=n,b;msvcp140_2=n,b;concrt140=n,b;vcruntime140=n,b;vcruntime140_1=n,b'
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+${WINEDLLOVERRIDES};}${runtime_overrides}"
 
-if ! mkdir -p "$HOME" "$WINEPREFIX" "$XDG_RUNTIME_DIR" \
+if ! mkdir -p "$NEF_WATCH_STATE_DIR" "$HOME" "$WINEPREFIX" "$XDG_RUNTIME_DIR" \
   || ! chmod 0700 "$HOME" "$XDG_RUNTIME_DIR"; then
   echo "Runtime state is not writable by uid $(id -u): $WINEPREFIX" >&2
   exit 73
 fi
+
+if ! NIKON_RUNTIME_DIR="$(python3 /usr/local/libexec/nef-watch-bootstrap-sdk.py)"; then
+  exit 70
+fi
+export NIKON_RUNTIME_DIR
+echo "Nikon SDK runtime ready: $NIKON_RUNTIME_DIR"
 
 if [[ ! -w "$WINEPREFIX" ]]; then
   echo "Wine prefix is not writable by uid $(id -u): $WINEPREFIX" >&2
@@ -122,12 +139,12 @@ mkdir -p "$profiles_dir"
 # allowlisted profiles after an image update and on every container restart.
 chmod 0755 "$profiles_dir"
 find "$profiles_dir" -maxdepth 1 -type f -exec chmod 0644 {} +
-cp -f /opt/nikon/Profiles/* "$profiles_dir/"
+cp -f "$NIKON_RUNTIME_DIR"/Profiles/* "$profiles_dir/"
 chmod 0644 "$profiles_dir"/*
 
 python3 /app/tool/nef_watch.py \
   --render-bin /app/tool/nef_render_wine.sh \
-  --profile /opt/nikon/Profiles/NKsRGB.icm \
+  --profile "$NIKON_RUNTIME_DIR/Profiles/NKsRGB.icm" \
   "$@" &
 app_pid=$!
 
