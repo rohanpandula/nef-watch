@@ -5,7 +5,8 @@
 // fine noise-like pattern (MAE ~5/255) on some render paths. Interposing rand()
 // with a deterministic LCG — and making srand() a no-op so the SDK's own
 // (time-based) seed is ignored — pins that dither to a fixed pattern, making
-// output byte-reproducible with no change in appearance or accuracy.
+// native macOS output byte-reproducible. This controls run-to-run variance; it
+// does not imply pixel equality with NX Studio or another SDK platform.
 //
 // Loaded by nef_watch.py --deterministic via DYLD_INSERT_LIBRARIES; not linked
 // into nef_render itself (two-level namespace wouldn't intercept the SDK's

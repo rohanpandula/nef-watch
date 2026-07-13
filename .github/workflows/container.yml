@@ -1,0 +1,212 @@
+name: SDK-free container
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: ghcr.io/rohanpandula/nef-watch
+
+jobs:
+  test:
+    name: Test and build linux/amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docker/requirements.lock
+
+      - name: Install test dependencies
+        run: python -m pip install --require-hashes -r docker/requirements.lock
+
+      - name: Run unit and script checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile docker/*.py tool/*.py \
+            .github/workflows/verify_sdk_free_image.py
+          python -m unittest discover -s .github/workflows \
+            -p 'test_*.py' -v
+          python -m unittest discover -s tests -v
+          bash -n docker/*.sh tool/*.sh
+          shellcheck --severity=warning docker/*.sh tool/*.sh
+
+      - name: Calculate source fingerprint
+        id: source
+        shell: bash
+        run: echo "fingerprint=$(bash docker/source-fingerprint.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build SDK-free image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          pull: true
+          push: false
+          provenance: false
+          tags: nef-watch:ci
+          build-args: |
+            NEF_WATCH_SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
+
+      - name: Verify image platform, CLI, and SDK-free contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          platform="$(docker image inspect nef-watch:ci --format '{{.Os}}/{{.Architecture}}')"
+          test "$platform" = "linux/amd64"
+          fingerprint="$(docker image inspect nef-watch:ci \
+            --format '{{index .Config.Labels "io.nef-watch.source.fingerprint"}}')"
+          test "$fingerprint" = "${{ steps.source.outputs.fingerprint }}"
+          bundled="$(docker image inspect nef-watch:ci \
+            --format '{{index .Config.Labels "io.nef-watch.nikon-sdk.bundled"}}')"
+          test "$bundled" = "false"
+          docker run --rm nef-watch:ci --help >/dev/null
+
+          docker save --output sdk-free-image.tar nef-watch:ci
+          python .github/workflows/verify_sdk_free_image.py \
+            sdk-free-image.tar docker/nikon-sdk-v1.46.sha256
+
+  publish:
+    name: Publish GHCR image
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+      artifact-metadata: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=linux-amd64,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=nef-watch
+            org.opencontainers.image.description=SDK-free Nikon NEF Docker wrapper; Nikon SDK supplied by the user
+            org.opencontainers.image.licenses=MIT
+            io.nef-watch.nikon-sdk.bundled=false
+
+      - name: Calculate source fingerprint
+        id: source
+        shell: bash
+        run: echo "fingerprint=$(bash docker/source-fingerprint.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Build publish candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          pull: true
+          push: false
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEF_WATCH_SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
+
+      - name: Verify publish candidate layers
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          SOURCE_FINGERPRINT: ${{ steps.source.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags <<< "$IMAGE_TAGS"
+          test "${#tags[@]}" -gt 0
+          primary_tag="${tags[0]}"
+
+          platform="$(docker image inspect "$primary_tag" --format '{{.Os}}/{{.Architecture}}')"
+          test "$platform" = "linux/amd64"
+          fingerprint="$(docker image inspect "$primary_tag" \
+            --format '{{index .Config.Labels "io.nef-watch.source.fingerprint"}}')"
+          test "$fingerprint" = "$SOURCE_FINGERPRINT"
+          bundled="$(docker image inspect "$primary_tag" \
+            --format '{{index .Config.Labels "io.nef-watch.nikon-sdk.bundled"}}')"
+          test "$bundled" = "false"
+          docker run --rm "$primary_tag" --help >/dev/null
+
+          docker save --output sdk-free-image.tar "$primary_tag"
+          python .github/workflows/verify_sdk_free_image.py \
+            sdk-free-image.tar docker/nikon-sdk-v1.46.sha256
+
+      - name: Publish verified image tags
+        id: publish
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags <<< "$IMAGE_TAGS"
+          test "${#tags[@]}" -gt 0
+
+          first_output="$(docker push "${tags[0]}" 2>&1 | tee /dev/stderr)"
+          digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' \
+            <<< "$first_output" | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          for tag in "${tags[@]:1}"; do
+            docker push "$tag"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest image provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

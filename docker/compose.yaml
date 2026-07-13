@@ -1,0 +1,48 @@
+services:
+  nef-watch:
+    image: ${IMAGE:-ghcr.io/rohanpandula/nef-watch:linux-amd64}
+    platform: linux/amd64
+    container_name: nef-watch
+    restart: unless-stopped
+    network_mode: none
+    user: 99:100
+    mem_limit: ${MEMORY_LIMIT:-4g}
+    memswap_limit: ${MEMORY_LIMIT:-4g}
+    cpus: ${CPU_LIMIT:-4}
+    pids_limit: ${PIDS_LIMIT:-256}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    tmpfs:
+      # Four 16-bit renders can use about 584 MiB of temporary NKRAW buffers.
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g
+      - /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m
+      - /run:rw,noexec,nosuid,nodev,mode=0755,size=8m
+    environment:
+      NEF_WATCH_HEALTH_INPUT: /input
+      NEF_WATCH_HEALTH_OUTPUT: /output
+      NIKON_SDK_DIR: /nikon-sdk
+    volumes:
+      - ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}:/input:ro
+      - ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}:/output:rw
+      - ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}:/nikon-sdk:ro
+      - nef-watch-state:/var/lib/nef-watch:rw
+    command:
+      - /input
+      - --out
+      - /output
+      - --recursive
+      - --jobs
+      - ${JOBS:-4}
+      - --interval
+      - ${INTERVAL:-3}
+
+volumes:
+  nef-watch-state:
