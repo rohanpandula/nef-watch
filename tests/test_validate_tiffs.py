@@ -45,6 +45,7 @@ def write_rgb(
         photometric="rgb",
         planarconfig="separate" if planar else "contig",
         compression=compression,
+        metadata=None,
         description=description,
         extratags=tags,
     )
@@ -195,6 +196,42 @@ class ValidateTiffsTests(unittest.TestCase):
         self.assertEqual(report["artifacts"][1]["primary_series"], 1)
         self.assertEqual(report["artifacts"][0]["ignored_series"], 1)
 
+    def test_strict_acceptance_rejects_extra_series_and_unapproved_metadata(self) -> None:
+        candidate = self.root / "candidate.tif"
+        thumbnail = np.zeros((2, 3, 3), dtype=np.uint8)
+        with tifffile.TiffWriter(candidate) as writer:
+            writer.write(
+                self.pixels,
+                photometric="rgb",
+                compression="lzw",
+                metadata=None,
+                description="covert metadata",
+                extratags=[
+                    (274, "H", 1, 1, False),
+                    (34675, 7, len(self.icc), self.icc, False),
+                ],
+            )
+            writer.write(thumbnail, photometric="rgb", metadata=None)
+
+        raster = validate_tiffs.inspect_tiff(
+            candidate, "candidate", strict_acceptance=True
+        )
+
+        self.assertTrue(any("exactly one image series" in item for item in raster.contract_errors))
+        self.assertTrue(any("unapproved top-level tags" in item for item in raster.contract_errors))
+
+    def test_strict_acceptance_rejects_unreferenced_trailing_payload(self) -> None:
+        candidate = self.root / "candidate.tif"
+        write_rgb(candidate, self.pixels, icc=self.icc, compression="lzw")
+        with candidate.open("ab") as stream:
+            stream.write(b"private trailing payload")
+
+        raster = validate_tiffs.inspect_tiff(
+            candidate, "candidate", strict_acceptance=True
+        )
+
+        self.assertTrue(any("trailing payload" in item for item in raster.contract_errors))
+
     def test_directory_mode_requires_same_relative_tiff_set(self) -> None:
         reference = self.root / "nx"
         candidate = self.root / "linux"
@@ -256,6 +293,17 @@ class ValidateTiffsTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["artifacts"][0]["dtype"], "uint16")
         self.assertEqual(report["artifacts"][0]["bits_per_sample"], [16, 16, 16])
+
+    def test_declared_raster_size_is_bounded_before_decode(self) -> None:
+        class HostileSeries:
+            axes = "YXS"
+            shape = (100_001, 1_000, 3)
+            dtype = np.dtype("uint8")
+
+        with self.assertRaisesRegex(validate_tiffs.OperationalError, "pixels"):
+            validate_tiffs._validate_series_bounds(
+                HostileSeries(), self.root / "hostile.tif"
+            )
 
 
 if __name__ == "__main__":

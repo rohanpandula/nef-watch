@@ -22,6 +22,7 @@
       "source_nef": "DSC_0722.NEF",
       "source_sha256": "ecdf2aaa435296328de24e2eddc8e08c3c4a7e2efd9abb0320f7e1a41dc74e8a",
       "tiff": "DSC_0722.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "269a7ff2e270d115b8e433baaea6bf6c74dacfde5004c8d7ff4ef6159423f16a", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "8afc83b0441b30a2c025d4accd01e41fdea41a0ae4615740ca1774c0e7ebd463", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
@@ -33,6 +34,7 @@
       "source_nef": "DSC_0723.NEF",
       "source_sha256": "e2d684965085ae8bce4faf80c51f5d86ada2c6b3c1b82db12e8044522c512b14",
       "tiff": "DSC_0723.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "0075bbdf49a04f435f8d497884235b8203388e27628c8ee51469718142c7f209", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "0756bab1f2a0e6388b9f5601dc11bd37e43e2f393a8a269ba053bd76c624a7ae", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
@@ -44,6 +46,7 @@
       "source_nef": "DSC_0724.NEF",
       "source_sha256": "36900f69e904442fe1c59c704234a9fc1bb9310586b8095e7a102f92e551943f",
       "tiff": "DSC_0724.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "05827cefebf516be64402755ef9e298fecf20d92e95eb85ec079150f50e7f953", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "fd165c9311b29e978749049ac4543c47a3789c35bfff91043142c27acaeed19d", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
@@ -55,6 +58,7 @@
       "source_nef": "DSC_0725.NEF",
       "source_sha256": "b3c3c9f1e7f12a9f84d540d8449bd10abaefd89eca94a090c9739a6d349bfd45",
       "tiff": "DSC_0725.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "8d48fb32131a8b89bcd129a5b1e69bab99783084bb5a07824b824ae40de1f915", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "97cd571115f68282f30d776a11217a717e8546ca107810c7a7230c55a2d2fb70", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
@@ -66,6 +70,7 @@
       "source_nef": "DSC_0726.NEF",
       "source_sha256": "c0cbb97cfc6f8cfd51343891b7b1047d3a4d2f54059468fb9ea08dbd3280146a",
       "tiff": "DSC_0726.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "64bd0b0c200ebf92bc3fd8ab0ddd691cede20554eb603de68c000ebbb18fa2cc", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "2a7f004d6ffd2093d63a18fda091ce3cc85cd0fc1945b46ef2b2342ed8b2d057", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
@@ -77,6 +82,7 @@
       "source_nef": "DSC_0727.NEF",
       "source_sha256": "6e7b5bf58c2877b74b81d2cf4da7580eb452f6f46a651ce0dbd411c1be82fe6a",
       "tiff": "DSC_0727.TIF",
+      "raster": {"shape_y_x_rgb": [6048, 4032, 3], "dtype": "uint8", "bits_per_sample": [8, 8, 8], "photometric": "RGB", "orientation": 1},
       "artifacts": {
         "nx": {"pixel_sha256": "8cbdb59dc3acb7a200c3d2bdd893a8490eb942f55a739536c18d197176727b90", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},
         "mac": {"pixel_sha256": "b7596f04303ae323ac937fc2b82e726e87b55db561558d442ffc0e8363117d3c", "icc_sha256": "49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e"},

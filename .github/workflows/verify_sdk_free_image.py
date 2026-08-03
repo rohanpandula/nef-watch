@@ -10,6 +10,14 @@ import tarfile
 from pathlib import Path, PurePosixPath
 
 
+MAX_IMAGE_ARCHIVE_BYTES = 6 * 1024**3
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_LAYERS = 256
+MAX_LAYER_BYTES = 4 * 1024**3
+MAX_LAYER_MEMBERS = 500_000
+MAX_MEMBER_BYTES = 2 * 1024**3
+
+
 def manifest_entries(path: Path) -> tuple[set[str], set[str]]:
     names: set[str] = set()
     hashes: set[str] = set()
@@ -33,25 +41,49 @@ def scan_image(image_path: Path, sdk_manifest: Path) -> list[str]:
     forbidden_names, forbidden_hashes = manifest_entries(sdk_manifest)
     matches: list[str] = []
 
+    if image_path.stat().st_size > MAX_IMAGE_ARCHIVE_BYTES:
+        raise ValueError("Docker image archive exceeds the 6 GiB safety limit")
+
     with tarfile.open(image_path, mode="r:") as image:
-        manifest_stream = image.extractfile("manifest.json")
+        manifest_member = image.getmember("manifest.json")
+        if not manifest_member.isfile() or manifest_member.size > MAX_MANIFEST_BYTES:
+            raise ValueError("Docker image manifest is missing, unsafe, or too large")
+        manifest_stream = image.extractfile(manifest_member)
         if manifest_stream is None:
             raise ValueError("Docker image archive has no manifest.json")
         image_manifest = json.load(manifest_stream)
-        layer_names = {
-            layer
-            for image_entry in image_manifest
-            for layer in image_entry.get("Layers", [])
-        }
-        if not layer_names:
-            raise ValueError("Docker image archive contains no layers")
+        if (
+            not isinstance(image_manifest, list)
+            or len(image_manifest) != 1
+            or not isinstance(image_manifest[0], dict)
+        ):
+            raise ValueError("Docker archive must contain exactly one image")
+        layers = image_manifest[0].get("Layers")
+        if (
+            not isinstance(layers, list)
+            or not layers
+            or len(layers) > MAX_LAYERS
+            or any(not isinstance(layer, str) or not layer for layer in layers)
+            or len(set(layers)) != len(layers)
+        ):
+            raise ValueError("Docker image archive has an unsafe layer list")
 
-        for layer_name in sorted(layer_names):
-            layer_stream = image.extractfile(layer_name)
+        for layer_name in layers:
+            try:
+                layer_member = image.getmember(layer_name)
+            except KeyError as exc:
+                raise ValueError(f"Docker image archive is missing {layer_name}") from exc
+            if not layer_member.isfile() or layer_member.size > MAX_LAYER_BYTES:
+                raise ValueError(f"Docker image layer is unsafe or too large: {layer_name}")
+            layer_stream = image.extractfile(layer_member)
             if layer_stream is None:
                 raise ValueError(f"Docker image archive is missing {layer_name}")
             with tarfile.open(fileobj=layer_stream, mode="r|*") as layer:
-                for member in layer:
+                for member_index, member in enumerate(layer, 1):
+                    if member_index > MAX_LAYER_MEMBERS:
+                        raise ValueError(f"Docker image layer has too many entries: {layer_name}")
+                    if member.size < 0 or member.size > MAX_MEMBER_BYTES:
+                        raise ValueError(f"Docker image member is too large: {member.name}")
                     basename = PurePosixPath(member.name).name.casefold()
                     if basename.startswith(".wh."):
                         continue

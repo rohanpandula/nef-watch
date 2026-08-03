@@ -12,12 +12,15 @@
 
 #import <Cocoa/Cocoa.h>
 #include "NkImageLibCtrl.h"
+#include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <vector>
 
 static constexpr std::uint64_t kMaxRenderedPixels = 100000000ULL;
@@ -25,12 +28,34 @@ static constexpr std::uint64_t kMaxRenderedBytes = 800000000ULL;
 
 static int channelsForColor(unsigned long ulColor) {
     switch (ulColor) {
-        case kNkfl_Color_Gray:     return 1;
         case kNkfl_Color_RGB_Gray: return 3;
         case kNkfl_Color_RGB:      return 3;
-        case kNkfl_Color_CMYK:     return 4;
         default:                   return 0;
     }
+}
+
+static bool parseBits(const char* text, int* value) {
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        (parsed != 8 && parsed != 16)) {
+        return false;
+    }
+    *value = static_cast<int>(parsed);
+    return true;
+}
+
+static bool parseExposure(const char* text, double* value) {
+    char* end = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !std::isfinite(parsed) ||
+        parsed < -5.0 || parsed > 5.0) {
+        return false;
+    }
+    *value = parsed;
+    return true;
 }
 
 // Human-readable text for Nkfl_Interface.h kNkfl_Code_Err_* values, so SDK
@@ -81,9 +106,13 @@ int main(int argc, char** argv) {
         const char* nefPath = argv[1];
         const char* rawPath = argv[2];
         const char* iccPath = argv[3];
-        int    outBits  = (argc >= 5) ? atoi(argv[4]) : 8;     // 8 or 16
-        double expComp  = (argc >= 6) ? atof(argv[5]) : 0.0;
-        if (outBits != 8 && outBits != 16) outBits = 8;
+        int outBits = 8;
+        double expComp = 0.0;
+        if ((argc >= 5 && !parseBits(argv[4], &outBits)) ||
+            (argc >= 6 && !parseExposure(argv[5], &expComp))) {
+            fprintf(stderr, "bits must be 8 or 16 and expcomp_ev must be finite within -5..5\n");
+            return 1;
+        }
 
         NSApplicationLoad();  // init AppKit for headless use (no run loop needed)
 
@@ -175,6 +204,13 @@ int main(int argc, char** argv) {
             ctrl.CloseSession(); CImageLibCtrl::CloseLibrary();
             return 5;
         }
+        if (outBits == 16 && srcDepth != 2) {
+            fprintf(stderr,
+                    "16-bit output requested but the SDK returned %lu-bit samples\n",
+                    srcDepth * 8);
+            ctrl.CloseSession(); CImageLibCtrl::CloseLibrary();
+            return 5;
+        }
         if (info.ulWidth == 0 || info.ulHeight == 0 ||
             info.ulWidth > SHRT_MAX || info.ulHeight > SHRT_MAX) {
             fprintf(stderr, "unsafe SDK image dimensions: %lux%lu\n",
@@ -194,7 +230,14 @@ int main(int argc, char** argv) {
             return 5;
         }
         size_t nbytes = static_cast<size_t>(nbytes64);
-        std::vector<unsigned char> buf(nbytes);
+        std::vector<unsigned char> buf;
+        try {
+            buf.resize(nbytes);
+        } catch (const std::bad_alloc&) {
+            fprintf(stderr, "cannot allocate SDK image buffer (%zu bytes)\n", nbytes);
+            ctrl.CloseSession(); CImageLibCtrl::CloseLibrary();
+            return 5;
+        }
 
         NkIL_ImageParam p = {0};
         p.rect.top = 0; p.rect.left = 0;
@@ -220,28 +263,32 @@ int main(int argc, char** argv) {
         // matching the validated spike path).
         size_t nsamp = (size_t)info.ulWidth * info.ulHeight * channels;
         unsigned long outDepth = srcDepth;
-        std::vector<unsigned char> out;
         if (srcDepth == 2 && outBits == 8) {
-            out.resize(nsamp);
+            // Compact in place. The destination byte is always before the next
+            // unread 16-bit sample, avoiding a second hundreds-of-MiB buffer.
             for (size_t i = 0; i < nsamp; ++i) {
                 std::uint16_t value = 0;
                 std::memcpy(&value, buf.data() + i * sizeof(value), sizeof(value));
-                out[i] = (unsigned char)(((unsigned int)value * 255 + 32767) / 65535);
+                buf[i] = (unsigned char)(((unsigned int)value * 255 + 32767) / 65535);
             }
+            buf.resize(nsamp);
             outDepth = 1;
-        } else {
-            out.swap(buf);  // write as-is (already 8-bit, or 16-bit requested)
-            outDepth = srcDepth;
         }
         size_t outBytes = nsamp * outDepth;
 
         FILE* f = fopen(rawPath, "wb");
         if (!f) { fprintf(stderr, "open out '%s'\n", rawPath); return 6; }
-        fprintf(f, "NKRAW1 %lu %lu %d %lu %lu\n",
-                info.ulWidth, info.ulHeight, channels, outDepth, info.ulOrientation);
-        size_t wrote = fwrite(out.data(), 1, outBytes, f);
-        fclose(f);
-        if (wrote != outBytes) { fprintf(stderr, "short write %zu/%zu\n", wrote, outBytes); return 7; }
+        const int header = fprintf(f, "NKRAW1 %lu %lu %d %lu %lu\n",
+                                   info.ulWidth, info.ulHeight, channels,
+                                   outDepth, info.ulOrientation);
+        const size_t wrote = fwrite(buf.data(), 1, outBytes, f);
+        const int flushResult = fflush(f);
+        const int closeResult = fclose(f);
+        if (header < 0 || wrote != outBytes || flushResult != 0 || closeResult != 0) {
+            std::remove(rawPath);
+            fprintf(stderr, "short or failed write %zu/%zu\n", wrote, outBytes);
+            return 7;
+        }
 
         printf("OK %lux%lu %dch %lubit orient=%lu\n",
                info.ulWidth, info.ulHeight, channels, outDepth * 8, info.ulOrientation);

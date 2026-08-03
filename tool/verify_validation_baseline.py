@@ -17,6 +17,40 @@ except ImportError:  # Direct execution: python3 tool/verify_validation_baseline
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+RASTER_BINDING_FIELDS = {
+    "shape_y_x_rgb",
+    "dtype",
+    "bits_per_sample",
+    "photometric",
+    "orientation",
+}
+
+
+def expected_raster_binding(value: object, field: str) -> dict:
+    if not isinstance(value, dict) or set(value) != RASTER_BINDING_FIELDS:
+        raise validate_tiffs.OperationalError(
+            f"{field} must contain the exact raster metadata fields"
+        )
+    shape = value.get("shape_y_x_rgb")
+    dtype = value.get("dtype")
+    expected_bits = [8, 8, 8] if dtype == "uint8" else [16, 16, 16]
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 3
+        or shape[2] != 3
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in shape
+        )
+        or dtype not in {"uint8", "uint16"}
+        or value.get("bits_per_sample") != expected_bits
+        or value.get("photometric") != "RGB"
+        or value.get("orientation") != 1
+    ):
+        raise validate_tiffs.OperationalError(
+            f"{field} is malformed or violates the raster contract"
+        )
+    return value
 
 
 def file_sha256(path: Path) -> str:
@@ -141,6 +175,9 @@ def verify(args: argparse.Namespace) -> tuple[dict, int]:
         tiff_key = tiff_relpath.casefold()
         expected_tiffs.add(tiff_key)
         expected_artifacts = image.get("artifacts", {})
+        expected_raster = expected_raster_binding(
+            image.get("raster"), f"{name}: raster"
+        )
         for label in sorted(required_labels):
             expected = expected_artifacts.get(label, {})
             path = inventories[label].get(tiff_key)
@@ -155,6 +192,12 @@ def verify(args: argparse.Namespace) -> tuple[dict, int]:
                 if summary.get(field) != expected.get(field):
                     provenance_errors.append(
                         f"{name}: {label} {field} {summary.get(field)} != {expected.get(field)}"
+                    )
+            for field in sorted(RASTER_BINDING_FIELDS):
+                if summary.get(field) != expected_raster[field]:
+                    provenance_errors.append(
+                        f"{name}: {label} raster {field} {summary.get(field)!r} "
+                        f"!= {expected_raster[field]!r}"
                     )
             if summary["contract_errors"]:
                 provenance_errors.extend(

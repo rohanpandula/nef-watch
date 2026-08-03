@@ -1,48 +1,194 @@
+x-runtime-image: &runtime-image
+  image: ${IMAGE:?Set IMAGE to an exact accepted local image ID sha256:<64 hex characters>}
+  pull_policy: never
+  platform: linux/amd64
+  network_mode: none
+  mem_limit: ${MEMORY_LIMIT:-4g}
+  memswap_limit: ${MEMORY_LIMIT:-4g}
+  cpus: ${CPU_LIMIT:-4}
+  pids_limit: ${PIDS_LIMIT:-256}
+  ulimits:
+    nofile:
+      soft: 512
+      hard: 512
+    fsize:
+      soft: 2147483648
+      hard: 2147483648
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  tmpfs:
+    # Render buffers live on the explicitly mounted fast-work filesystem, not RAM.
+    - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m
+    - /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m
+    - /run:rw,noexec,nosuid,nodev,mode=0755,size=8m
+
+x-runtime-environment: &runtime-environment
+  NEF_WATCH_HEALTH_INPUT: /input
+  NEF_WATCH_HEALTH_OUTPUT: /output
+  NEF_WATCH_HEALTH_TEMP: /work/nef-watch
+  NEF_WATCH_HEALTH_FILE: /var/lib/nef-watch/app-state/health.json
+  NEF_WATCH_HEALTH_MAX_AGE: ${HEALTH_MAX_AGE_SECONDS:-120}
+  NEF_WATCH_INTERVAL_SECONDS: ${INTERVAL:-3}
+  NEF_WATCH_IMAGE_REFERENCE: ${IMAGE:?Set IMAGE to an exact accepted local image ID}
+  # Fixed by the reviewed Compose model. Pre-acceptance fixture containers do
+  # not set this production-only gate.
+  NEF_WATCH_REQUIRE_ACCEPTANCE_REPORT: "1"
+  NEF_WATCH_PRE_ACCEPTANCE_FIXTURE_MODE: "0"
+  NEF_WATCH_INIT_LOCK_TIMEOUT: ${INIT_LOCK_TIMEOUT_SECONDS:-30}
+  NEF_WATCH_UID: "99"
+  NEF_WATCH_GID: "100"
+  NEF_WATCH_REQUIRE_LANDLOCK: "1"
+  NEF_WATCH_LEGACY_INPUT_ROOT: ${LEGACY_INPUT_ROOT:-}
+  # A container has one X11 Unix-socket namespace. Serial rendering is the
+  # fail-closed boundary that prevents one Nikon job from reaching a sibling.
+  NEF_WATCH_RENDER_JOBS: "1"
+  NEF_WATCH_RENDER_MEMORY_MIB: ${RENDER_MEMORY_MIB:-1536}
+  NEF_WATCH_SDK_MEMORY_MIB: ${SDK_MEMORY_MIB:-512}
+  NEF_WATCH_RENDER_FILE_SIZE_MIB: ${RENDER_FILE_SIZE_MIB:-2048}
+  NEF_WATCH_RENDER_TIMEOUT: ${RENDER_TIMEOUT_SECONDS:-300}
+  NEF_WATCH_EXIF_TIMEOUT: ${EXIF_TIMEOUT_SECONDS:-60}
+  NEF_WATCH_DNG_TIMEOUT: ${DNG_TIMEOUT_SECONDS:-300}
+  NEF_WATCH_KILL_GRACE_SECONDS: ${TOOL_KILL_GRACE_SECONDS:-5}
+  NEF_WATCH_SETTLE_SECONDS: ${SETTLE_SECONDS:-5}
+  NEF_WATCH_SDK_BOOTSTRAP_TIMEOUT: ${SDK_BOOTSTRAP_TIMEOUT_SECONDS:-300}
+  NEF_WATCH_STARTUP_KILL_GRACE: ${STARTUP_KILL_GRACE_SECONDS:-10}
+  NEF_WATCH_TEMP_CAPACITY_BYTES: ${TEMP_CAPACITY_BYTES:-17179869184}
+  NEF_WATCH_TEMP_MIN_FREE_BYTES: ${TEMP_MIN_FREE_BYTES:-8589934592}
+  NEF_WATCH_TEMP_DIR: /work/nef-watch
+  NEF_WATCH_VC_REDIST_TIMEOUT: ${VC_REDIST_TIMEOUT_SECONDS:-180}
+  NEF_WATCH_WINEBOOT_TIMEOUT: ${WINEBOOT_TIMEOUT_SECONDS:-120}
+  NEF_WATCH_WINESERVER_TIMEOUT: ${WINESERVER_TIMEOUT_SECONDS:-60}
+  TMPDIR: /work/nef-watch
+
 services:
-  nef-watch:
-    image: ${IMAGE:-ghcr.io/rohanpandula/nef-watch:linux-amd64}
-    platform: linux/amd64
-    container_name: nef-watch
-    restart: unless-stopped
-    network_mode: none
-    user: 99:100
-    mem_limit: ${MEMORY_LIMIT:-4g}
-    memswap_limit: ${MEMORY_LIMIT:-4g}
-    cpus: ${CPU_LIMIT:-4}
-    pids_limit: ${PIDS_LIMIT:-256}
-    read_only: true
+  # This root-capable service exists only long enough to validate storage,
+  # stage the private Nikon runtime, and seal the reusable Wine template.
+  nef-watch-init:
+    <<: *runtime-image
+    container_name: nef-watch-init
+    restart: "no"
+    entrypoint:
+      - /usr/bin/tini
+      - -g
+      - --
+      - /usr/local/bin/nef-watch-entrypoint
     cap_drop:
       - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-    tmpfs:
-      # Four 16-bit renders can use about 584 MiB of temporary NKRAW buffers.
-      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g
-      - /tmp/.X11-unix:rw,noexec,nosuid,nodev,mode=1777,size=1m
-      - /run:rw,noexec,nosuid,nodev,mode=0755,size=8m
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETPCAP
+      - SETUID
     environment:
-      NEF_WATCH_HEALTH_INPUT: /input
-      NEF_WATCH_HEALTH_OUTPUT: /output
+      <<: *runtime-environment
       NIKON_SDK_DIR: /nikon-sdk
     volumes:
-      - ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}:/input:ro
-      - ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}:/output:rw
-      - ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}:/nikon-sdk:ro
-      - nef-watch-state:/var/lib/nef-watch:rw
+      - type: bind
+        source: ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}
+        target: /input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}
+        target: /output
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NIKON_SDK_DIR:?Set NIKON_SDK_DIR to Image SDK/Library/win}
+        target: /nikon-sdk
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NEF_TEMP_DIR:?Set NEF_TEMP_DIR to a dedicated capacity-bounded NVMe filesystem}
+        target: /work/nef-watch
+        bind:
+          create_host_path: false
+      - type: volume
+        source: nef-watch-state
+        target: /var/lib/nef-watch
+      - type: bind
+        source: ${ACCEPTANCE_REPORT:?Set ACCEPTANCE_REPORT to the exact retained acceptance JSON}
+        target: /run/nef-watch-acceptance.json
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      disable: true
+    command:
+      - --initialize-only
+
+  # The long-running watcher starts directly as nobody:users, with no Linux
+  # capabilities and no access to the host Nikon SDK directory.
+  nef-watch:
+    <<: *runtime-image
+    container_name: nef-watch
+    restart: unless-stopped
+    user: "99:100"
+    stop_grace_period: ${STOP_GRACE_PERIOD:-7m}
+    depends_on:
+      nef-watch-init:
+        condition: service_completed_successfully
+        restart: true
+    cap_drop:
+      - ALL
+    environment:
+      <<: *runtime-environment
+      HOME: /var/lib/nef-watch/home
+      NEF_WATCH_INIT_COMPLETE: "1"
+    volumes:
+      - type: bind
+        source: ${NEF_INPUT:?Set NEF_INPUT to the Unraid input directory}
+        target: /input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NEF_OUTPUT:?Set NEF_OUTPUT to the Unraid output directory}
+        target: /output
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NEF_TEMP_DIR:?Set NEF_TEMP_DIR to a dedicated capacity-bounded NVMe filesystem}
+        target: /work/nef-watch
+        bind:
+          create_host_path: false
+      - type: volume
+        source: nef-watch-state
+        target: /var/lib/nef-watch
+      - type: bind
+        source: ${ACCEPTANCE_REPORT:?Set ACCEPTANCE_REPORT to the exact retained acceptance JSON}
+        target: /run/nef-watch-acceptance.json
+        read_only: true
+        bind:
+          create_host_path: false
     command:
       - /input
       - --out
       - /output
       - --recursive
+      - --skip-existing
+      - --temp-dir
+      - /work/nef-watch
+      - --state-dir
+      - /var/lib/nef-watch/app-state
       - --jobs
-      - ${JOBS:-4}
+      - "1"
       - --interval
       - ${INTERVAL:-3}
+      - --max-scan-entries
+      - ${MAX_SCAN_ENTRIES:-100000}
 
 volumes:
   nef-watch-state:

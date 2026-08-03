@@ -21,7 +21,12 @@ def add_bytes(archive: tarfile.TarFile, name: str, payload: bytes) -> None:
     archive.addfile(member, io.BytesIO(payload))
 
 
-def image_archive(path: Path, members: list[tuple[str, bytes | None]]) -> None:
+def image_archive(
+    path: Path,
+    members: list[tuple[str, bytes | None]],
+    *,
+    manifest_entries: int = 1,
+) -> None:
     layer_buffer = io.BytesIO()
     with tarfile.open(fileobj=layer_buffer, mode="w") as layer:
         for name, payload in members:
@@ -37,7 +42,12 @@ def image_archive(path: Path, members: list[tuple[str, bytes | None]]) -> None:
         add_bytes(
             image,
             "manifest.json",
-            json.dumps([{"Config": "config.json", "Layers": ["layer.tar"]}]).encode(),
+            json.dumps(
+                [
+                    {"Config": "config.json", "Layers": ["layer.tar"]}
+                    for _ in range(manifest_entries)
+                ]
+            ).encode(),
         )
         add_bytes(image, "config.json", b"{}")
         add_bytes(image, "layer.tar", layer_buffer.getvalue())
@@ -73,6 +83,31 @@ class SdkFreeImageScanTests(unittest.TestCase):
             [("usr/share/nef-watch/nikon-sdk-v1.46.sha256", metadata)]
         )
         self.assertEqual(matches, [])
+
+    def test_archive_with_multiple_images_fails_closed(self) -> None:
+        image = self.root / "multi-image.tar"
+        image_archive(image, [("app/file", b"safe")], manifest_entries=2)
+        with self.assertRaisesRegex(ValueError, "exactly one image"):
+            scan_image(image, self.manifest)
+
+    def test_duplicate_layer_names_fail_closed(self) -> None:
+        image = self.root / "duplicate-layer.tar"
+        image_archive(image, [("app/file", b"safe")])
+        with tarfile.open(image, mode="a") as archive:
+            add_bytes(
+                archive,
+                "manifest.json",
+                json.dumps(
+                    [
+                        {
+                            "Config": "config.json",
+                            "Layers": ["layer.tar", "layer.tar"],
+                        }
+                    ]
+                ).encode(),
+            )
+        with self.assertRaisesRegex(ValueError, "unsafe layer list"):
+            scan_image(image, self.manifest)
 
 
 if __name__ == "__main__":

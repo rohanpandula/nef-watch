@@ -35,6 +35,42 @@ TIFF_SUFFIXES = {".tif", ".tiff"}
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHANNEL_NAMES = ("R", "G", "B")
 ROW_CHUNK = 256
+MAX_RASTER_PIXELS = 100_000_000
+MAX_RASTER_BYTES = 800_000_000
+MAX_ACCEPTANCE_NON_RASTER_BYTES = 2 * 1024 * 1024
+MAX_ACCEPTANCE_DATA_SEGMENTS = 200_000
+ACCEPTANCE_ALLOWED_TIFF_TAGS = frozenset(
+    {
+        256,  # ImageWidth
+        257,  # ImageLength
+        258,  # BitsPerSample
+        259,  # Compression
+        262,  # PhotometricInterpretation
+        271,  # Make
+        272,  # Model
+        273,  # StripOffsets
+        274,  # Orientation
+        277,  # SamplesPerPixel
+        278,  # RowsPerStrip
+        279,  # StripByteCounts
+        282,  # XResolution
+        283,  # YResolution
+        284,  # PlanarConfiguration
+        296,  # ResolutionUnit
+        305,  # Software
+        306,  # DateTime
+        315,  # Artist
+        317,  # Predictor
+        532,  # ReferenceBlackWhite
+        33432,  # Copyright
+        34665,  # ExifIFD
+        34675,  # ICC profile
+        34853,  # GPSIFD
+    }
+)
+ACCEPTANCE_REQUIRED_TIFF_TAGS = frozenset(
+    {256, 257, 258, 259, 262, 273, 274, 277, 278, 279, 284, 34675}
+)
 
 
 class OperationalError(RuntimeError):
@@ -140,6 +176,36 @@ def _choose_primary_series(tf: Any) -> tuple[int, list[str]]:
     return min(largest), errors
 
 
+def _validate_series_bounds(series: Any, path: Path) -> None:
+    """Reject hostile dimensions before tifffile allocates/decompresses pixels."""
+    try:
+        shape = tuple(int(value) for value in series.shape)
+        dtype = np.dtype(series.dtype)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise OperationalError(f"{path}: primary raster metadata is malformed") from exc
+    if not shape or any(value <= 0 for value in shape):
+        raise OperationalError(f"{path}: primary raster has invalid shape {shape}")
+    order = _axis_order(str(series.axes), len(shape))
+    if order is None:
+        # Invalid axes remain a contract failure, but still bound the prospective
+        # allocation using every declared dimension.
+        sample_count = math.prod(shape)
+        pixel_count = sample_count
+    else:
+        y_axis, x_axis, _ = order
+        pixel_count = shape[y_axis] * shape[x_axis]
+        sample_count = math.prod(shape)
+    if pixel_count > MAX_RASTER_PIXELS:
+        raise OperationalError(
+            f"{path}: primary raster exceeds {MAX_RASTER_PIXELS} pixels"
+        )
+    decoded_bytes = sample_count * dtype.itemsize
+    if decoded_bytes > MAX_RASTER_BYTES:
+        raise OperationalError(
+            f"{path}: primary raster exceeds the {MAX_RASTER_BYTES}-byte decode limit"
+        )
+
+
 def _normalise_bits(value: Any, samples: int) -> tuple[int, ...]:
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         bits = tuple(int(item) for item in value)
@@ -176,7 +242,92 @@ def _canonical_pixel_hash(pixels: np.ndarray) -> str:
     return digest.hexdigest()
 
 
-def inspect_tiff(path: Path, label: str) -> TiffRaster:
+def _strict_acceptance_contract(tf: Any, page: Any, path: Path) -> list[str]:
+    """Constrain runtime acceptance to the one-image archival TIFF we emit."""
+    errors: list[str] = []
+    if len(tf.series) != 1 or len(tf.pages) != 1:
+        errors.append(
+            "acceptance TIFF must contain exactly one image series and one page "
+            f"(found {len(tf.series)} series, {len(tf.pages)} pages)"
+        )
+
+    tag_codes = {int(tag.code) for tag in page.tags.values()}
+    unexpected = sorted(tag_codes - ACCEPTANCE_ALLOWED_TIFF_TAGS)
+    missing = sorted(ACCEPTANCE_REQUIRED_TIFF_TAGS - tag_codes)
+    if unexpected:
+        errors.append(f"acceptance TIFF has unapproved top-level tags: {unexpected}")
+    if missing:
+        errors.append(f"acceptance TIFF is missing required top-level tags: {missing}")
+
+    if _enum_name(getattr(page, "compression", "UNKNOWN")) != "LZW":
+        errors.append("acceptance TIFF compression must be LZW")
+    if _enum_name(getattr(page, "planarconfig", "UNKNOWN")) != "CONTIG":
+        errors.append("acceptance TIFF planar configuration must be contiguous")
+    if bool(getattr(page, "is_tiled", False)):
+        errors.append("acceptance TIFF must use strips, not tiles")
+
+    try:
+        file_size = path.stat().st_size
+        offsets = tuple(int(value) for value in page.dataoffsets)
+        bytecounts = tuple(int(value) for value in page.databytecounts)
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        raise OperationalError(f"{path}: TIFF extent metadata is malformed") from exc
+    if (
+        not offsets
+        or len(offsets) != len(bytecounts)
+        or len(offsets) > MAX_ACCEPTANCE_DATA_SEGMENTS
+    ):
+        errors.append("acceptance TIFF has an unsafe raster segment table")
+        return errors
+
+    ranges: list[tuple[int, int]] = []
+    for offset, bytecount in zip(offsets, bytecounts):
+        end = offset + bytecount
+        if offset < 0 or bytecount <= 0 or end > file_size:
+            errors.append("acceptance TIFF has an out-of-bounds raster segment")
+            return errors
+        ranges.append((offset, end))
+    ordered_ranges = sorted(ranges)
+    if any(start < previous_end for (_, previous_end), (start, _) in zip(
+        ordered_ranges, ordered_ranges[1:]
+    )):
+        errors.append("acceptance TIFF raster segments overlap")
+
+    raster_bytes = sum(end - start for start, end in ordered_ranges)
+    non_raster_bytes = file_size - raster_bytes
+    if non_raster_bytes < 0 or non_raster_bytes > MAX_ACCEPTANCE_NON_RASTER_BYTES:
+        errors.append(
+            "acceptance TIFF non-raster payload exceeds "
+            f"{MAX_ACCEPTANCE_NON_RASTER_BYTES} bytes"
+        )
+
+    # A payload appended after the final referenced TIFF extent is never needed
+    # by nef-watch. Include the IFD table, tag values, and raster segments when
+    # finding that extent; inline tag values live inside the IFD range.
+    ifd_entry_bytes = 20 if bool(getattr(tf, "is_bigtiff", False)) else 12
+    ifd_count_bytes = 8 if bool(getattr(tf, "is_bigtiff", False)) else 2
+    ifd_next_bytes = 8 if bool(getattr(tf, "is_bigtiff", False)) else 4
+    referenced_ends = [
+        ifd_count_bytes + int(page.offset) + ifd_entry_bytes * len(page.tags) + ifd_next_bytes,
+        *(end for _, end in ordered_ranges),
+    ]
+    for tag in page.tags.values():
+        try:
+            value_offset = int(tag.valueoffset)
+            value_size = int(tag.valuebytecount)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise OperationalError(f"{path}: TIFF tag extent is malformed") from exc
+        value_end = value_offset + value_size
+        if value_offset < 0 or value_size < 0 or value_end > file_size:
+            errors.append(f"acceptance TIFF tag {tag.code} is out of bounds")
+        else:
+            referenced_ends.append(value_end)
+    if max(referenced_ends, default=0) != file_size:
+        errors.append("acceptance TIFF has an unreferenced trailing payload")
+    return errors
+
+
+def inspect_tiff(path: Path, label: str, *, strict_acceptance: bool = False) -> TiffRaster:
     if tifffile is None:
         raise OperationalError(
             "tifffile is required; install requirements.txt or `pip install tifffile imagecodecs`"
@@ -189,7 +340,10 @@ def inspect_tiff(path: Path, label: str) -> TiffRaster:
             series = tf.series[series_index]
             if not series.pages:
                 raise OperationalError(f"{path}: primary TIFF series contains no pages")
+            _validate_series_bounds(series, path)
             page = series.pages[0]
+            if strict_acceptance:
+                contract_errors.extend(_strict_acceptance_contract(tf, page, path))
             axes = str(series.axes)
             try:
                 raw = np.asarray(series.asarray())
@@ -197,6 +351,10 @@ def inspect_tiff(path: Path, label: str) -> TiffRaster:
                 raise OperationalError(
                     f"{path}: cannot decode primary raster: {exc}"
                 ) from exc
+            if raw.nbytes > MAX_RASTER_BYTES:
+                raise OperationalError(
+                    f"{path}: decoded raster exceeds the {MAX_RASTER_BYTES}-byte limit"
+                )
 
             order = _axis_order(axes, raw.ndim)
             pixels: Optional[np.ndarray]

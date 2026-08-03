@@ -16,11 +16,16 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <fcntl.h>
+#include <io.h>
 #include <limits>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -29,8 +34,19 @@ namespace {
 HMODULE g_sdk = nullptr;
 Nkfl_EntryProcPtr g_entry = nullptr;
 bool g_libraryOpen = false;
+char g_swapPath[MAX_PATH] = {};
 constexpr std::uint64_t kMaxRenderedPixels = 100000000ULL;
 constexpr std::uint64_t kMaxRenderedBytes = 800000000ULL;
+constexpr unsigned long kDefaultRenderMemoryMiB = 1536;
+constexpr unsigned long kMinRenderMemoryMiB = 768;
+constexpr unsigned long kMaxRenderMemoryMiB = 16384;
+constexpr unsigned long kDefaultSdkMemoryMiB = 512;
+constexpr unsigned long kMinSdkMemoryMiB = 256;
+constexpr unsigned long kRendererOverheadMiB = 256;
+unsigned long g_renderMemoryMiB = kDefaultRenderMemoryMiB;
+unsigned long g_sdkMemoryMiB = kDefaultSdkMemoryMiB;
+unsigned long g_bufferMemoryMiB =
+    kDefaultRenderMemoryMiB - kDefaultSdkMemoryMiB - kRendererOverheadMiB;
 
 const char* nkflErrText(unsigned long code) {
     switch (code) {
@@ -124,18 +140,198 @@ bool checkedSize(std::uint64_t value, std::size_t* out) {
 
 int channelsForColor(unsigned long color) {
     switch (color) {
-        case kNkfl_Color_Gray: return 1;
         case kNkfl_Color_RGB_Gray: return 3;
         case kNkfl_Color_RGB: return 3;
-        case kNkfl_Color_CMYK: return 4;
         default: return 0;
     }
 }
 
+bool parseMemoryEnvironment(const char* name, unsigned long fallback,
+                            unsigned long minimum, unsigned long maximum,
+                            unsigned long* memoryMiB) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0') {
+        *memoryMiB = fallback;
+        return true;
+    }
+    for (const char* digit = value; *digit != '\0'; ++digit) {
+        if (*digit < '0' || *digit > '9') {
+            std::fprintf(stderr, "%s must contain decimal digits only\n", name);
+            return false;
+        }
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < minimum ||
+        parsed > maximum) {
+        std::fprintf(stderr, "%s must be an integer from %lu to %lu\n", name,
+                     minimum, maximum);
+        return false;
+    }
+    *memoryMiB = parsed;
+    return true;
+}
+
+bool configuredRenderMemory(unsigned long* totalMiB, unsigned long* sdkMiB,
+                            unsigned long* bufferMiB) {
+    if (!parseMemoryEnvironment(
+            "NEF_WATCH_RENDER_MEMORY_MIB", kDefaultRenderMemoryMiB,
+            kMinRenderMemoryMiB, kMaxRenderMemoryMiB, totalMiB) ||
+        !parseMemoryEnvironment(
+            "NEF_WATCH_SDK_MEMORY_MIB", kDefaultSdkMemoryMiB,
+            kMinSdkMemoryMiB, kMaxRenderMemoryMiB, sdkMiB)) {
+        return false;
+    }
+    if (*sdkMiB > *totalMiB - kRendererOverheadMiB ||
+        *totalMiB - kRendererOverheadMiB - *sdkMiB < 256) {
+        std::fprintf(
+            stderr,
+            "render memory budget is too small: total=%lu MiB sdk=%lu MiB; "
+            "at least %lu MiB overhead and 256 MiB pixels are required\n",
+            *totalMiB, *sdkMiB, kRendererOverheadMiB);
+        return false;
+    }
+    *bufferMiB = *totalMiB - kRendererOverheadMiB - *sdkMiB;
+    return true;
+}
+
+bool hasWindowsPrefix(const char* path, const char* prefix) {
+    return _strnicmp(path, prefix, std::strlen(prefix)) == 0;
+}
+
+bool safeRendererPath(const char* path, const char* requiredPrefix,
+                      const char* label) {
+    if (!hasWindowsPrefix(path, requiredPrefix)) {
+        std::fprintf(stderr, "%s must be beneath %s\n", label, requiredPrefix);
+        return false;
+    }
+    const char* relative = path + std::strlen(requiredPrefix);
+    if (*relative == '\0' || std::strstr(relative, "..") != nullptr ||
+        std::strchr(relative, ':') != nullptr ||
+        std::strchr(relative, '/') != nullptr) {
+        std::fprintf(stderr, "%s contains an unsafe Windows path component\n", label);
+        return false;
+    }
+    return true;
+}
+
+FILE* openExclusiveOutput(const char* rawPath) {
+    HANDLE handle = CreateFileA(
+        rawPath, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN |
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        std::fprintf(stderr, "cannot exclusively create output '%s' [Win32 %lu]\n",
+                     rawPath, GetLastError());
+        return nullptr;
+    }
+    BY_HANDLE_FILE_INFORMATION information = {};
+    if (!GetFileInformationByHandle(handle, &information) ||
+        (information.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        information.nNumberOfLinks != 1) {
+        const DWORD error = GetLastError();
+        std::fprintf(stderr,
+                     "new output is not a single-link regular file [Win32 %lu]\n",
+                     error);
+        CloseHandle(handle);
+        DeleteFileA(rawPath);
+        return nullptr;
+    }
+    const int descriptor = _open_osfhandle(
+        reinterpret_cast<intptr_t>(handle), _O_WRONLY | _O_BINARY);
+    if (descriptor < 0) {
+        std::fprintf(stderr, "cannot attach output handle: %s\n", std::strerror(errno));
+        CloseHandle(handle);
+        DeleteFileA(rawPath);
+        return nullptr;
+    }
+    FILE* file = _fdopen(descriptor, "wb");
+    if (!file) {
+        std::fprintf(stderr, "cannot create output stream: %s\n", std::strerror(errno));
+        _close(descriptor);
+        DeleteFileA(rawPath);
+        return nullptr;
+    }
+    return file;
+}
+
+bool parseBits(const char* value, int* bits) {
+    if (std::strcmp(value, "8") == 0) {
+        *bits = 8;
+        return true;
+    }
+    if (std::strcmp(value, "16") == 0) {
+        *bits = 16;
+        return true;
+    }
+    std::fprintf(stderr, "bits must be exactly 8 or 16\n");
+    return false;
+}
+
+bool parseExposure(const char* value, double* exposure) {
+    errno = 0;
+    char* end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (errno != 0 || end == value || *end != '\0' || !std::isfinite(parsed) ||
+        parsed < -5.0 || parsed > 5.0) {
+        std::fprintf(stderr,
+                     "expcomp_ev must be a finite number from -5 through 5\n");
+        return false;
+    }
+    *exposure = parsed;
+    return true;
+}
+
 bool loadSdk() {
-    g_sdk = LoadLibraryExA("NkImgSDK.dll", nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    wchar_t executablePath[32768] = {};
+    const DWORD executableLength = GetModuleFileNameW(
+        nullptr, executablePath,
+        static_cast<DWORD>(sizeof(executablePath) / sizeof(executablePath[0])));
+    if (executableLength == 0 ||
+        executableLength >= sizeof(executablePath) / sizeof(executablePath[0])) {
+        std::fprintf(stderr, "GetModuleFileNameW failed or returned a truncated path "
+                             "[Win32 %lu]\n",
+                     GetLastError());
+        return false;
+    }
+    wchar_t* separator = std::wcsrchr(executablePath, L'\\');
+    wchar_t* slash = std::wcsrchr(executablePath, L'/');
+    if (!separator || (slash && slash > separator)) separator = slash;
+    if (!separator) {
+        std::fprintf(stderr, "renderer executable path has no directory\n");
+        return false;
+    }
+    constexpr wchar_t kSdkName[] = L"NkImgSDK.dll";
+    const std::size_t directoryLength =
+        static_cast<std::size_t>(separator - executablePath + 1);
+    if (directoryLength + (sizeof(kSdkName) / sizeof(kSdkName[0])) >
+        sizeof(executablePath) / sizeof(executablePath[0])) {
+        std::fprintf(stderr, "renderer executable directory is too long\n");
+        return false;
+    }
+    std::wmemcpy(executablePath + directoryLength, kSdkName,
+                 sizeof(kSdkName) / sizeof(kSdkName[0]));
+
+    // Remove the working directory from both explicit and transitive DLL
+    // searches. The Nikon DLL and its private dependencies must come from the
+    // immutable, attested directory beside this executable; MSVC dependencies
+    // come from System32 in the private Wine prefix.
+    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                                  LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+        std::fprintf(stderr, "SetDefaultDllDirectories failed [Win32 %lu]\n",
+                     GetLastError());
+        return false;
+    }
+    g_sdk = LoadLibraryExW(executablePath, nullptr,
+                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                               LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                               LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!g_sdk) {
-        std::fprintf(stderr, "LoadLibraryExA(NkImgSDK.dll) failed [Win32 %lu]\n",
+        std::fprintf(stderr, "LoadLibraryExW(<renderer-dir>/NkImgSDK.dll) failed "
+                             "[Win32 %lu]\n",
                      GetLastError());
         return false;
     }
@@ -160,32 +356,82 @@ bool openLibrary() {
     param.ulSize = sizeof(param);
     param.ulVersion = 0x01000000;
 
-    MEMORYSTATUSEX memory = {};
-    memory.dwLength = sizeof(memory);
-    if (GlobalMemoryStatusEx(&memory)) {
-        const std::uint64_t mib = memory.ullAvailPhys >> 20;
-        param.ulVMMemorySize = static_cast<unsigned long>(
-            std::max<std::uint64_t>(256, std::min<std::uint64_t>(mib / 2, 16384)));
-    } else {
-        param.ulVMMemorySize = 1024;
+    if (!configuredRenderMemory(&g_renderMemoryMiB, &g_sdkMemoryMiB,
+                                &g_bufferMemoryMiB)) {
+        return false;
     }
+    param.ulVMMemorySize = g_sdkMemoryMiB;
 
+    const char* configuredTemp = std::getenv("NEF_WATCH_WINE_TEMP_DIR");
+    if (!configuredTemp || configuredTemp[0] == '\0') {
+        std::fprintf(stderr,
+                     "NEF_WATCH_WINE_TEMP_DIR is required; refusing to place "
+                     "Nikon swap data in Wine's persistent state\n");
+        return false;
+    }
+    const std::size_t configuredTempLength = std::strlen(configuredTemp);
+    if (configuredTempLength < 3 || configuredTempLength >= MAX_PATH - 1 ||
+        ((configuredTemp[0] < 'A' || configuredTemp[0] > 'Z') &&
+         (configuredTemp[0] < 'a' || configuredTemp[0] > 'z')) ||
+        configuredTemp[1] != ':' ||
+        (configuredTemp[2] != '\\' && configuredTemp[2] != '/')) {
+        std::fprintf(stderr,
+                     "NEF_WATCH_WINE_TEMP_DIR must be an absolute Windows "
+                     "drive path shorter than MAX_PATH\n");
+        return false;
+    }
     char tempDir[MAX_PATH] = {};
-    if (GetTempPathA(MAX_PATH, tempDir) == 0) {
-        std::strncpy(tempDir, "C:\\windows\\temp\\", MAX_PATH - 1);
+    std::memcpy(tempDir, configuredTemp, configuredTempLength + 1);
+    std::size_t tempLength = configuredTempLength;
+    if (tempDir[tempLength - 1] != '\\' && tempDir[tempLength - 1] != '/') {
+        tempDir[tempLength++] = '\\';
+        tempDir[tempLength] = '\0';
     }
-    char swapPath[MAX_PATH] = {};
-    if (GetTempFileNameA(tempDir, "nkr", 0, swapPath) == 0) {
-        std::snprintf(swapPath, sizeof(swapPath), "%snef-watch.swap", tempDir);
+    const DWORD tempAttributes = GetFileAttributesA(tempDir);
+    if (tempAttributes == INVALID_FILE_ATTRIBUTES ||
+        !(tempAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (tempAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        std::fprintf(stderr,
+                     "configured Nikon temporary path is not a real directory "
+                     "[Win32 %lu]\n",
+                     GetLastError());
+        return false;
     }
-    const std::size_t swapLength =
-        std::min(std::strlen(swapPath), sizeof(param.VMFileInfo) - 1);
-    std::memcpy(param.VMFileInfo, swapPath, swapLength);
-    param.VMFileInfo[swapLength] = '\0';
-    const std::size_t tempLength =
-        std::min(std::strlen(tempDir), sizeof(param.DefProfPath) - 1);
-    std::memcpy(param.DefProfPath, tempDir, tempLength);
-    param.DefProfPath[tempLength] = '\0';
+    const char* swapPath = std::getenv("NEF_WATCH_WINE_SWAP_PATH");
+    if (!swapPath || swapPath[0] == '\0') {
+        std::fprintf(stderr,
+                     "NEF_WATCH_WINE_SWAP_PATH is required; the Linux wrapper "
+                     "must own the unique swap-file lifecycle\n");
+        return false;
+    }
+    const std::size_t swapLength = std::strlen(swapPath);
+    if (swapLength <= tempLength || swapLength >= sizeof(g_swapPath) ||
+        std::strncmp(swapPath, tempDir, tempLength) != 0 ||
+        std::strchr(swapPath + tempLength, '\\') != nullptr ||
+        std::strchr(swapPath + tempLength, '/') != nullptr) {
+        std::fprintf(stderr,
+                     "NEF_WATCH_WINE_SWAP_PATH must name one direct child of "
+                     "NEF_WATCH_WINE_TEMP_DIR\n");
+        return false;
+    }
+    const DWORD swapAttributes = GetFileAttributesA(swapPath);
+    if (swapAttributes == INVALID_FILE_ATTRIBUTES ||
+        (swapAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+        std::fprintf(stderr,
+                     "configured Nikon swap path is not a real file [Win32 %lu]\n",
+                     GetLastError());
+        return false;
+    }
+    std::memcpy(g_swapPath, swapPath, swapLength + 1);
+    const std::size_t profilePathLength = std::strlen(tempDir);
+    if (swapLength >= sizeof(param.VMFileInfo) ||
+        profilePathLength >= sizeof(param.DefProfPath)) {
+        std::fprintf(stderr, "Wine temporary path does not fit Nikon SDK fields\n");
+        return false;
+    }
+    std::memcpy(param.VMFileInfo, swapPath, swapLength + 1);
+    std::memcpy(param.DefProfPath, tempDir, profilePathLength + 1);
 
     if (!check(g_entry(kNkfl_Cmd_OpenLibrary, &param), "OpenLibrary")) return false;
     g_libraryOpen = true;
@@ -220,6 +466,13 @@ void closeLibrary() {
     g_entry = nullptr;
     if (g_sdk) FreeLibrary(g_sdk);
     g_sdk = nullptr;
+    if (g_swapPath[0] != '\0') {
+        if (!DeleteFileA(g_swapPath) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+            std::fprintf(stderr, "cannot remove Nikon swap file [Win32 %lu]\n",
+                         GetLastError());
+        }
+        g_swapPath[0] = '\0';
+    }
 }
 
 bool closeSession(unsigned long sessionId) {
@@ -243,7 +496,7 @@ bool rawDevelopment(unsigned long sessionId, unsigned long operation, void* data
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
+    if (argc < 4 || argc > 6) {
         std::fprintf(stderr,
                      "usage: %s <input.nef> <output.raw> <profile.icm> "
                      "[bits=8] [expcomp_ev=0]\n",
@@ -254,9 +507,17 @@ int main(int argc, char** argv) {
     const char* nefPath = argv[1];
     const char* rawPath = argv[2];
     const char* profilePath = argv[3];
-    int outBits = argc >= 5 ? std::atoi(argv[4]) : 8;
-    const double expComp = argc >= 6 ? std::atof(argv[5]) : 0.0;
-    if (outBits != 8 && outBits != 16) outBits = 8;
+    int outBits = 8;
+    double expComp = 0.0;
+    if ((argc >= 5 && !parseBits(argv[4], &outBits)) ||
+        (argc >= 6 && !parseExposure(argv[5], &expComp))) {
+        return 1;
+    }
+    if (!safeRendererPath(nefPath, "T:\\input\\", "input") ||
+        !safeRendererPath(rawPath, "T:\\output\\", "output") ||
+        !safeRendererPath(profilePath, "R:\\Profiles\\", "profile")) {
+        return 1;
+    }
 
     if (!openLibrary()) {
         closeLibrary();
@@ -347,8 +608,19 @@ int main(int argc, char** argv) {
 
     const int channels = channelsForColor(info.ulColor);
     if (channels == 0 || (info.ulByteDepth != 1 && info.ulByteDepth != 2)) {
-        std::fprintf(stderr, "unsupported SDK image format: color=0x%lx depth=%lu\n",
+        std::fprintf(stderr,
+                     "unsupported SDK image format (NKRAW1 requires RGB): "
+                     "color=0x%lx depth=%lu\n",
                      info.ulColor, info.ulByteDepth);
+        closeSession(sessionId);
+        closeLibrary();
+        return 5;
+    }
+    if (outBits == 16 && info.ulByteDepth != 2) {
+        std::fprintf(stderr,
+                     "16-bit output requested but Nikon SDK returned only "
+                     "%lu-bit samples\n",
+                     info.ulByteDepth * 8);
         closeSession(sessionId);
         closeLibrary();
         return 5;
@@ -368,17 +640,32 @@ int main(int argc, char** argv) {
     std::size_t sourceBytes = 0;
     const std::uint64_t sourceBytes64 =
         renderedPixels * static_cast<std::uint64_t>(channels) * info.ulByteDepth;
+    const std::uint64_t configuredBufferLimit =
+        static_cast<std::uint64_t>(g_bufferMemoryMiB) * 1024ULL * 1024ULL;
     if (sourceBytes64 > kMaxRenderedBytes ||
+        sourceBytes64 > configuredBufferLimit ||
         !checkedSize(sourceBytes64, &sourceBytes)) {
         std::fprintf(stderr,
-                     "rendered image exceeds the %llu-byte safety limit\n",
+                     "rendered image needs %llu bytes; configured per-render "
+                     "limit is %llu bytes (absolute limit %llu)\n",
+                     static_cast<unsigned long long>(sourceBytes64),
+                     static_cast<unsigned long long>(configuredBufferLimit),
                      static_cast<unsigned long long>(kMaxRenderedBytes));
         closeSession(sessionId);
         closeLibrary();
         return 5;
     }
 
-    std::vector<unsigned char> source(sourceBytes);
+    std::vector<unsigned char> source;
+    try {
+        source.resize(sourceBytes);
+    } catch (const std::bad_alloc&) {
+        std::fprintf(stderr, "cannot allocate %zu-byte rendered image buffer\n",
+                     sourceBytes);
+        closeSession(sessionId);
+        closeLibrary();
+        return 5;
+    }
     NkflImageParam image = {};
     image.ulSize = sizeof(image);
     image.ulSessionID = sessionId;
@@ -403,30 +690,27 @@ int main(int argc, char** argv) {
 
     const std::size_t samples = sourceBytes / info.ulByteDepth;
     unsigned long outputDepth = info.ulByteDepth;
-    std::vector<unsigned char> output;
     if (info.ulByteDepth == 2 && outBits == 8) {
-        output.resize(samples);
+        // Convert forward in-place: each output byte is written below the two
+        // source bytes needed by all current and future iterations. This avoids
+        // a second hundreds-of-megabytes allocation under the cgroup limit.
         for (std::size_t i = 0; i < samples; ++i) {
             std::uint16_t value = 0;
             std::memcpy(&value, source.data() + i * sizeof(value), sizeof(value));
-            output[i] = static_cast<unsigned char>(
+            source[i] = static_cast<unsigned char>(
                 (static_cast<std::uint32_t>(value) * 255u + 32767u) / 65535u);
         }
         outputDepth = 1;
-    } else {
-        output.swap(source);
     }
 
-    FILE* file = std::fopen(rawPath, "wb");
+    FILE* file = openExclusiveOutput(rawPath);
     if (!file) {
-        std::fprintf(stderr, "cannot open output '%s': %s\n", rawPath,
-                     std::strerror(errno));
         return 7;
     }
     std::fprintf(file, "NKRAW1 %lu %lu %d %lu %lu\n", info.ulWidth,
                  info.ulHeight, channels, outputDepth, info.ulOrientation);
     const std::size_t outputBytes = samples * outputDepth;
-    const std::size_t written = std::fwrite(output.data(), 1, outputBytes, file);
+    const std::size_t written = std::fwrite(source.data(), 1, outputBytes, file);
     const int closeResult = std::fclose(file);
     if (written != outputBytes || closeResult != 0) {
         std::fprintf(stderr, "short write %zu/%zu\n", written, outputBytes);
