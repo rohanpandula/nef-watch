@@ -45,16 +45,21 @@ ADD --checksum=sha256:cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a918407209
 # moving Bookworm mirrors prune superseded binaries.  Signature verification
 # stays enabled; only the archived Release file's elapsed Valid-Until is ignored.
 RUN sed -ri \
-      's|^URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20260623T000000Z|; s|^URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20260623T000000Z|' \
+      's|^URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20260802T000000Z|; s|^URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20260802T000000Z|' \
       /etc/apt/sources.list.d/debian.sources \
-    && grep -Fx 'URIs: https://snapshot.debian.org/archive/debian/20260623T000000Z' \
+    && grep -Fx 'URIs: https://snapshot.debian.org/archive/debian/20260802T000000Z' \
          /etc/apt/sources.list.d/debian.sources \
-    && grep -Fx 'URIs: https://snapshot.debian.org/archive/debian-security/20260623T000000Z' \
+    && grep -Fx 'URIs: https://snapshot.debian.org/archive/debian-security/20260802T000000Z' \
          /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
          g++-mingw-w64-x86-64=12.2.0-14+25.2 \
          libimage-exiftool-perl=12.57+dfsg-1 \
+         libcurl4=7.88.1-10+deb12u15 \
+         libgl1-mesa-dri=22.3.6-1+deb12u2 \
+         libglapi-mesa=22.3.6-1+deb12u2 \
+         libglx-mesa0=22.3.6-1+deb12u2 \
+         libxfont2=1:2.0.6-1+deb12u1 \
          tini=0.19.0-1+b3 \
          util-linux=2.38.1-5+deb12u3 \
          wine=8.0~repack-4 \
@@ -151,7 +156,7 @@ RUN set -eux; \
 
 LABEL io.nef-watch.nikon-sdk.bundled="false"
 LABEL io.nef-watch.nikon-sdk.expected-manifest-fingerprint="0e8aba70b296966c03c407c8dd77ddee5c073924b9fb38f988881c366a1fbc51"
-LABEL io.nef-watch.debian.snapshot="20260623T000000Z"
+LABEL io.nef-watch.debian.snapshot="20260802T000000Z"
 LABEL io.nef-watch.source.fingerprint="${NEF_WATCH_SOURCE_FINGERPRINT}"
 LABEL org.opencontainers.image.revision="${NEF_WATCH_SOURCE_REVISION}"
 LABEL io.nef-watch.vc-redist.sha256="cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b"

@@ -169,15 +169,23 @@ class PublicImagePackagingTests(unittest.TestCase):
         self.assertIn("NEF_WATCH_APP_HOME=/var/lib/nef-watch/home", dockerfile)
         self.assertIn("NEF_WATCH_RENDER_JOBS=1", dockerfile)
         self.assertIn(
-            "https://snapshot.debian.org/archive/debian/20260623T000000Z",
+            "https://snapshot.debian.org/archive/debian/20260802T000000Z",
             dockerfile,
         )
         self.assertIn(
-            "https://snapshot.debian.org/archive/debian-security/20260623T000000Z",
+            "https://snapshot.debian.org/archive/debian-security/20260802T000000Z",
             dockerfile,
         )
         self.assertIn("Acquire::Check-Valid-Until=false", dockerfile)
-        self.assertIn('io.nef-watch.debian.snapshot="20260623T000000Z"', dockerfile)
+        self.assertIn('io.nef-watch.debian.snapshot="20260802T000000Z"', dockerfile)
+        for package in (
+            "libcurl4=7.88.1-10+deb12u15",
+            "libgl1-mesa-dri=22.3.6-1+deb12u2",
+            "libglapi-mesa=22.3.6-1+deb12u2",
+            "libglx-mesa0=22.3.6-1+deb12u2",
+            "libxfont2=1:2.0.6-1+deb12u1",
+        ):
+            self.assertIn(package, dockerfile)
         self.assertIn('org.opencontainers.image.revision="${NEF_WATCH_SOURCE_REVISION}"', dockerfile)
         self.assertIn("PYTHONNOUSERSITE=1", dockerfile)
         self.assertIn("PYTHONSAFEPATH=1", dockerfile)
