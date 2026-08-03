@@ -15,6 +15,33 @@ SCHEMA = "wine8-deb12-vc14-cc0ff0eb1dc3-landlock6-v3"
 
 
 class WineWrapperStaticTests(unittest.TestCase):
+    def test_host_python_override_is_confined_to_explicit_test_mode(self) -> None:
+        wrapper = WRAPPER.read_text(encoding="utf-8")
+        self.assertEqual(wrapper.count("/usr/local/bin/python3"), 1)
+        self.assertIn("PYTHON_COMMAND=/usr/local/bin/python3", wrapper)
+        self.assertIn(
+            'if [[ "${NEF_WATCH_TEST_ALLOW_UNSEALED_TEMPLATE:-0}" != "1" ||',
+            wrapper,
+        )
+
+    def test_host_python_override_is_rejected_when_landlock_is_required(self) -> None:
+        env = {
+            **os.environ,
+            "NEF_WATCH_TEST_ALLOW_UNSEALED_TEMPLATE": "1",
+            "NEF_WATCH_TEST_PYTHON_BIN": sys.executable,
+            "NEF_WATCH_REQUIRE_LANDLOCK": "1",
+        }
+        result = subprocess.run(
+            [str(WRAPPER), "input.nef", "output.raw", "profile.icm"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("with Landlock disabled", result.stderr)
+
     def test_render_file_limit_never_exceeds_container_hard_limit(self) -> None:
         wrapper = WRAPPER.read_text(encoding="utf-8")
         self.assertIn("file_size_mib > 2048", wrapper)
@@ -142,6 +169,7 @@ class WineWrapperTests(unittest.TestCase):
             "NEF_WATCH_TEMP_DIR": str(work),
             "NEF_WATCH_X_SOCKET_DIR": str(x_socket_dir),
             "NEF_WATCH_TEST_ALLOW_UNSEALED_TEMPLATE": "1",
+            "NEF_WATCH_TEST_PYTHON_BIN": sys.executable,
             "NEF_WATCH_REQUIRE_LANDLOCK": "0",
             "NEF_WATCH_WINE_SANDBOX_HELPER": str(fake_sandbox),
             "NEF_WATCH_RENDER_SUPERVISOR": str(fake_supervisor),

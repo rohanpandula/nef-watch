@@ -6983,7 +6983,10 @@ def run_watch(args, out_dir, icc, state=None, config_fingerprint=None):
             ),
             prior_session_cutoff=time.time(),
         )
-    last_recovery_at = 0.0
+    # A numeric zero only means "run immediately" after the host has been up
+    # for at least one interval. Anchor this to the current monotonic clock so
+    # recovery also runs immediately just after a host reboot.
+    last_recovery_at = time.monotonic() - RECOVERY_INTERVAL_SECONDS
     last_state_prune_at = 0.0
     recovery_limit_reported = False
     recovery_issue_reported = False

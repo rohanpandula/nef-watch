@@ -3584,6 +3584,8 @@ class AdversarialWatchLoopTests(unittest.TestCase):
                     state, "write_health", side_effect=record_status
                 ), mock.patch.object(
                     nef_watch.STOP_EVENT, "wait", side_effect=stop_after_scan
+                ), mock.patch.object(
+                    nef_watch.time, "monotonic", return_value=1.0
                 ):
                     result = nef_watch.run_watch(
                         args,

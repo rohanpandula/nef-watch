@@ -26,6 +26,29 @@ absolute_path() {
   printf '%s' "$path"
 }
 
+# Production always uses the interpreter sealed into the image. Host-side
+# wrapper tests may opt into their current interpreter, but only alongside the
+# existing explicit unsealed-template test mode.
+PYTHON_COMMAND=/usr/local/bin/python3
+if [[ -n "${NEF_WATCH_TEST_PYTHON_BIN:-}" ]]; then
+  if [[ "${NEF_WATCH_TEST_ALLOW_UNSEALED_TEMPLATE:-0}" != "1" ||
+        "${NEF_WATCH_REQUIRE_LANDLOCK:-1}" != "0" ]]; then
+    echo "test Python override requires unsealed-template mode with Landlock disabled" >&2
+    exit 64
+  fi
+  python_candidate="$(absolute_path "$NEF_WATCH_TEST_PYTHON_BIN")"
+  if [[ ! -f "$python_candidate" || ! -x "$python_candidate" ]]; then
+    echo "test Python interpreter is unavailable: $python_candidate" >&2
+    exit 64
+  fi
+  PYTHON_COMMAND="$(realpath "$python_candidate")"
+  if [[ "$PYTHON_COMMAND" != /* || ! -f "$PYTHON_COMMAND" || ! -x "$PYTHON_COMMAND" ]]; then
+    echo "test Python interpreter does not resolve to an executable file" >&2
+    exit 64
+  fi
+fi
+readonly PYTHON_COMMAND
+
 require_real_directory() {
   local label="$1" candidate="$2" resolved
   candidate="$(absolute_path "$candidate")"
@@ -611,7 +634,7 @@ private_display=$((1000 + ($$ % 50000)))
 export DISPLAY=":$private_display"
 export XAUTHORITY="$job_root/.Xauthority"
 export NEF_WATCH_XVFB_LOG="$job_root/output/xvfb.log"
-/usr/local/bin/python3 -I - "$XAUTHORITY" "$private_display" <<'PY'
+"$PYTHON_COMMAND" -I - "$XAUTHORITY" "$private_display" <<'PY'
 import os
 import struct
 import sys
@@ -699,7 +722,7 @@ trap 'forward_signal HUP 129' HUP
 
 landlock_command=()
 if [[ "${NEF_WATCH_REQUIRE_LANDLOCK:-1}" != "0" ]]; then
-  landlock_command=(/usr/local/bin/python3 -I "$LANDLOCK_EXEC")
+  landlock_command=("$PYTHON_COMMAND" -I "$LANDLOCK_EXEC")
   # Wine spans wineserver and Windows service PIDs. A rule anchored to the
   # launcher's /proc/self inode does not follow that process family and stalls
   # real Nikon renders. Read-only procfs is therefore the narrow compatible
@@ -734,12 +757,12 @@ resource_command=(
 # process working directory. The sealed R: mapping names this exact directory.
 cd -- "$RUNTIME_DIR"
 if [[ "$SMOKE_MODE" -eq 1 ]]; then
-  /usr/local/bin/python3 -I "$RENDER_SUPERVISOR" -- \
+  "$PYTHON_COMMAND" -I "$RENDER_SUPERVISOR" -- \
     "${resource_command[@]}" "$WINE_SANDBOX_HELPER" \
     "${landlock_command[@]}" "$WINE_COMMAND" \
     'C:\windows\system32\cmd.exe' /d /c 'echo NEF_WATCH_WINE_SMOKE_OK' &
 else
-  /usr/local/bin/python3 -I "$RENDER_SUPERVISOR" -- \
+  "$PYTHON_COMMAND" -I "$RENDER_SUPERVISOR" -- \
     "${resource_command[@]}" "$WINE_SANDBOX_HELPER" \
     "${landlock_command[@]}" "$WINE_COMMAND" 'R:\nef_render.exe' \
     'T:\input\source.'"${source_path##*.}" \

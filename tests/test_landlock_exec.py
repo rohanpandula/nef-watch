@@ -323,9 +323,18 @@ for path in sys.argv[2:]:
         raise SystemExit(f"{label} unexpectedly succeeded: {path}")
 """
             arguments = [sys.executable, str(LAUNCHER)]
-            for path in ("/usr", "/etc", "/lib", "/lib64"):
-                if Path(path).exists():
-                    arguments.extend(("--ro", path))
+            read_paths = [
+                Path("/usr"),
+                Path("/etc"),
+                Path("/lib"),
+                Path("/lib64"),
+                Path(sys.prefix),
+                Path(sys.base_prefix),
+            ]
+            for path in dict.fromkeys(
+                candidate.resolve() for candidate in read_paths if candidate.exists()
+            ):
+                arguments.extend(("--ro", str(path)))
             arguments.extend(
                 (
                     "--rw",
