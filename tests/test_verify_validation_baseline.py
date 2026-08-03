@@ -55,6 +55,13 @@ class VerifyValidationBaselineTests(unittest.TestCase):
                         self.source.read_bytes()
                     ).hexdigest(),
                     "tiff": "sample.TIF",
+                    "raster": {
+                        "shape_y_x_rgb": [4, 5, 3],
+                        "dtype": "uint8",
+                        "bits_per_sample": [8, 8, 8],
+                        "photometric": "RGB",
+                        "orientation": 1,
+                    },
                     "artifacts": artifacts,
                 }
             ],
@@ -94,6 +101,24 @@ class VerifyValidationBaselineTests(unittest.TestCase):
         command[command.index(IMAGE_ID)] = "sha256:unknown"
         command[command.index(SOURCE_FINGERPRINT)] = "compose-direct-unverified"
         self.assertEqual(verify_validation_baseline.main(command), 1)
+
+    def test_equal_pixel_bytes_with_swapped_dimensions_fail_manifest_binding(self) -> None:
+        swapped = self.pixels.reshape(5, 4, 3)
+        self.assertEqual(
+            validate_tiffs._canonical_pixel_hash(swapped),
+            validate_tiffs._canonical_pixel_hash(self.pixels),
+        )
+        for directory in self.artifact_dirs.values():
+            write_rgb(directory / "sample.TIF", swapped, icc=self.icc)
+
+        args = verify_validation_baseline.build_parser().parse_args(self.command())
+        report, exit_code = verify_validation_baseline.verify(args)
+
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(report["equality"]["passed"])
+        self.assertTrue(
+            any("raster shape_y_x_rgb" in error for error in report["provenance_errors"])
+        )
 
 
 if __name__ == "__main__":

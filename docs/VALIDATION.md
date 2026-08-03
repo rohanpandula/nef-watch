@@ -107,6 +107,10 @@ Studio references. Each artifact was 4032×6048 (width×height) RGB uint8 with
 Orientation 1 and
 the same Nikon sRGB ICC SHA-256
 `49caea94c9d36322910350ee37f1fa09629bed70e01cf615a6863ad3f8d1475e`.
+The manifest binds that exact `[6048, 4032, 3]` Y/X/RGB shape, dtype, bits per
+sample, photometric interpretation, and orientation in addition to decoded
+pixel hashes; adding this metadata did not change any recorded pixel or ICC
+hash.
 The recorded Linux artifacts were reproduced exactly by the public-wrapper
 candidate image
 `sha256:85e3aa93db238068c75cb3a4b0891ab5af17adaa325077c3967827832ec08b80`

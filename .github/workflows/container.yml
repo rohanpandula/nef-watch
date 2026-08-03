@@ -1,31 +1,34 @@
-name: SDK-free container
+name: SDK-free container validation
 
 on:
   pull_request:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
+  # A frozen, reproducible Debian snapshot must still be re-evaluated against
+  # current vulnerability intelligence.  A fixable HIGH/CRITICAL finding fails
+  # below and requires an intentional snapshot and package-pin refresh.
+  schedule:
+    - cron: "17 11 * * 1"
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  IMAGE_NAME: ghcr.io/rohanpandula/nef-watch
+# This workflow validates only. It has no registry, artifact-publication, OIDC,
+# attestation, or package authority.
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: Test and build linux/amd64
+    name: Secretless unit and script validation
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
+    timeout-minutes: 30
 
     steps:
-      - name: Check out repository
+      - name: Check out repository without persisted credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -37,7 +40,7 @@ jobs:
           cache: pip
           cache-dependency-path: docker/requirements.lock
 
-      - name: Install test dependencies
+      - name: Install locked test dependencies
         run: python -m pip install --require-hashes -r docker/requirements.lock
 
       - name: Run unit and script checks
@@ -52,99 +55,125 @@ jobs:
           bash -n docker/*.sh tool/*.sh
           shellcheck --severity=warning docker/*.sh tool/*.sh
 
-      - name: Calculate source fingerprint
-        id: source
-        shell: bash
-        run: echo "fingerprint=$(bash docker/source-fingerprint.sh)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build SDK-free image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64
-          load: true
-          pull: true
-          push: false
-          provenance: false
-          tags: nef-watch:ci
-          build-args: |
-            NEF_WATCH_SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
-
-      - name: Verify image platform, CLI, and SDK-free contents
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          platform="$(docker image inspect nef-watch:ci --format '{{.Os}}/{{.Architecture}}')"
-          test "$platform" = "linux/amd64"
-          fingerprint="$(docker image inspect nef-watch:ci \
-            --format '{{index .Config.Labels "io.nef-watch.source.fingerprint"}}')"
-          test "$fingerprint" = "${{ steps.source.outputs.fingerprint }}"
-          bundled="$(docker image inspect nef-watch:ci \
-            --format '{{index .Config.Labels "io.nef-watch.nikon-sdk.bundled"}}')"
-          test "$bundled" = "false"
-          docker run --rm nef-watch:ci --help >/dev/null
-
-          docker save --output sdk-free-image.tar nef-watch:ci
-          python .github/workflows/verify_sdk_free_image.py \
-            sdk-free-image.tar docker/nikon-sdk-v1.46.sha256
-
-  publish:
-    name: Publish GHCR image
-    if: github.event_name != 'pull_request'
-    needs: test
+  build:
+    name: Isolated SDK-free build and exact-image scan
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-      artifact-metadata: write
+    timeout-minutes: 60
 
     steps:
-      - name: Check out repository
+      - name: Check out repository without persisted credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate image tags and labels
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=linux-amd64,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-          labels: |
-            org.opencontainers.image.title=nef-watch
-            org.opencontainers.image.description=SDK-free Nikon NEF Docker wrapper; Nikon SDK supplied by the user
-            org.opencontainers.image.licenses=MIT
-            io.nef-watch.nikon-sdk.bundled=false
-
-      - name: Calculate source fingerprint
+      # Do not execute a checked-out fingerprint helper in this job. Hash the
+      # exact Git blobs using reviewer-visible workflow code so repository tests
+      # and working-tree mutations cannot influence the build identity.
+      - name: Calculate source fingerprint from exact Git blobs
         id: source
         shell: bash
-        run: echo "fingerprint=$(bash docker/source-fingerprint.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          fingerprint="$(python3 - "$GITHUB_SHA" <<'PY'
+          import hashlib
+          import subprocess
+          import sys
+          from pathlib import PurePosixPath
 
-      - name: Build publish candidate
+          commit = sys.argv[1]
+          fixed = {
+              ".github/workflows/verify_sdk_free_image.py",
+              ".dockerignore",
+              "requirements.txt",
+              "pyproject.toml",
+              "tool/nef_watch.py",
+              "tool/nef_render_win.cpp",
+              "tool/nef_render_wine.sh",
+              "tool/nef_wine_sandbox.sh",
+              "tool/stage_runtime_acceptance.py",
+              "tool/validate_tiffs.py",
+              "tool/verify_runtime_acceptance.py",
+              "validation/baseline-v1.json",
+          }
+
+          def included(path: str) -> bool:
+              relative = PurePosixPath(path)
+              if not relative.parts or relative.parts[0] != "docker":
+                  return False
+              if "__pycache__" in relative.parts:
+                  return False
+              if relative.name in {".env", ".DS_Store"}:
+                  return False
+              return relative.suffix not in {".pyc", ".pyo"}
+
+          listing = subprocess.check_output(
+              [
+                  "git", "ls-tree", "-r", "-z", "-l", "--full-tree",
+                  commit, "--", "docker", *sorted(fixed),
+              ]
+          )
+          if len(listing) > 8 * 1024 * 1024:
+              raise SystemExit("Git source tree listing exceeds 8 MiB")
+
+          selected = {}
+          records = [record for record in listing.split(b"\0") if record]
+          if len(records) > 4096:
+              raise SystemExit("Git source tree contains too many entries")
+          for record in records:
+              header, raw_path = record.split(b"\t", 1)
+              mode, object_type, object_id, raw_size = header.decode("ascii").split()
+              path = raw_path.decode("utf-8")
+              relative = PurePosixPath(path)
+              if (
+                  not path
+                  or "\\" in path
+                  or "\n" in path
+                  or "\r" in path
+                  or relative.is_absolute()
+                  or any(part in {"", ".", ".."} for part in relative.parts)
+              ):
+                  raise SystemExit(f"unsafe source path: {path!r}")
+              if path not in fixed and not included(path):
+                  continue
+              if object_type != "blob" or mode not in {"100644", "100755"}:
+                  raise SystemExit(f"source input is not a regular Git blob: {path}")
+              selected[path] = (object_id, int(raw_size))
+
+          missing = sorted(fixed - set(selected))
+          if missing:
+              raise SystemExit(f"missing source inputs: {', '.join(missing)}")
+
+          total = 0
+          entries = []
+          for path, (object_id, size) in sorted(selected.items()):
+              if size < 0 or size > 16 * 1024 * 1024:
+                  raise SystemExit(f"source file exceeds 16 MiB: {path}")
+              total += size
+              if total > 64 * 1024 * 1024:
+                  raise SystemExit("source inputs exceed 64 MiB")
+              payload = subprocess.check_output(
+                  ["git", "cat-file", "blob", object_id]
+              )
+              if len(payload) != size:
+                  raise SystemExit(f"Git blob size changed: {path}")
+              entries.append((path, hashlib.sha256(payload).hexdigest()))
+
+          manifest = "".join(
+              f"{digest}  {path}\n" for path, digest in sorted(entries)
+          )
+          print(hashlib.sha256(manifest.encode("utf-8")).hexdigest())
+          PY
+          )"
+          [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]]
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: v0.34.1
+          driver-opts: image=moby/buildkit@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
+
+      - name: Build SDK-free image without registry credentials
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -154,59 +183,167 @@ jobs:
           pull: true
           push: false
           provenance: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: nef-watch:validation
+          labels: |
+            org.opencontainers.image.title=nef-watch
+            org.opencontainers.image.description=SDK-free Nikon NEF Docker wrapper; Nikon SDK supplied by the user
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.nef-watch.nikon-sdk.bundled=false
           build-args: |
             NEF_WATCH_SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
+            NEF_WATCH_SOURCE_REVISION=${{ github.sha }}
 
-      - name: Verify publish candidate layers
+      - name: Bind validation to the exact local image ID
+        id: image
         shell: bash
         env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
           SOURCE_FINGERPRINT: ${{ steps.source.outputs.fingerprint }}
         run: |
           set -euo pipefail
-          mapfile -t tags <<< "$IMAGE_TAGS"
-          test "${#tags[@]}" -gt 0
-          primary_tag="${tags[0]}"
+          image_id="$(docker image inspect nef-watch:validation --format '{{.Id}}')"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(docker image inspect "$image_id" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$image_id" \
+            --format '{{index .Config.Labels "io.nef-watch.source.fingerprint"}}')" \
+            = "$SOURCE_FINGERPRINT"
+          test "$(docker image inspect "$image_id" \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" \
+            = "$GITHUB_SHA"
+          test "$(docker image inspect "$image_id" \
+            --format '{{index .Config.Labels "io.nef-watch.nikon-sdk.bundled"}}')" \
+            = false
+          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
 
-          platform="$(docker image inspect "$primary_tag" --format '{{.Os}}/{{.Architecture}}')"
-          test "$platform" = "linux/amd64"
-          fingerprint="$(docker image inspect "$primary_tag" \
-            --format '{{index .Config.Labels "io.nef-watch.source.fingerprint"}}')"
-          test "$fingerprint" = "$SOURCE_FINGERPRINT"
-          bundled="$(docker image inspect "$primary_tag" \
-            --format '{{index .Config.Labels "io.nef-watch.nikon-sdk.bundled"}}')"
-          test "$bundled" = "false"
-          docker run --rm "$primary_tag" --help >/dev/null
+      - name: Install pinned Trivy scanner without repository configuration
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.72.0
+          cache: false
+          path: ${{ runner.temp }}/nef-watch-trivy-install
 
-          docker save --output sdk-free-image.tar "$primary_tag"
-          python .github/workflows/verify_sdk_free_image.py \
-            sdk-free-image.tar docker/nikon-sdk-v1.46.sha256
-
-      - name: Publish verified image tags
-        id: publish
+      - name: Reject fixable high and critical vulnerabilities in the exact image
         shell: bash
         env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+        run: |
+          # Run the installed binary by its resolved absolute path under env -i.
+          # The isolated cwd/HOME/XDG/config/ignore/module paths make a checked-in
+          # trivy.yaml, .trivyignore, ambient TRIVY_* variable, module, or plugin
+          # unable to alter this exact-image vulnerability decision.
+          set -euo pipefail
+          policy_root="$RUNNER_TEMP/nef-watch-trivy"
+          /usr/bin/install -d -m 0700 \
+            "$policy_root/cache" "$policy_root/home" \
+            "$policy_root/xdg-config" "$policy_root/xdg-data" \
+            "$policy_root/modules"
+          printf '{}\n' > "$policy_root/config.yaml"
+          : > "$policy_root/ignore"
+          /usr/bin/chmod 0400 "$policy_root/config.yaml" "$policy_root/ignore"
+          trivy_bin="$RUNNER_TEMP/nef-watch-trivy-install/trivy-bin/trivy"
+          test "$(/usr/bin/realpath "$trivy_bin")" = "$trivy_bin"
+          test -x "$trivy_bin"
+          case "$trivy_bin" in
+            "$GITHUB_WORKSPACE"/*)
+              echo 'refusing repository-provided Trivy executable' >&2
+              exit 1
+              ;;
+          esac
+          test "$(/usr/bin/stat -c %u "$trivy_bin")" = "$(/usr/bin/id -u)"
+          test -z "$(/usr/bin/find "$trivy_bin" -maxdepth 0 -perm /022 -print -quit)"
+          test "$($trivy_bin --version | /usr/bin/sed -n 's/^Version: //p')" = 0.72.0
+          (
+            cd "$policy_root"
+            /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+              HOME="$policy_root/home" \
+              XDG_CONFIG_HOME="$policy_root/xdg-config" \
+              XDG_DATA_HOME="$policy_root/xdg-data" \
+              DOCKER_HOST=unix:///var/run/docker.sock LC_ALL=C LANG=C \
+              /usr/bin/timeout --signal=TERM --kill-after=30s 12m \
+                "$trivy_bin" --config "$policy_root/config.yaml" image \
+                  --cache-dir "$policy_root/cache" \
+                  --ignorefile "$policy_root/ignore" \
+                  --module-dir "$policy_root/modules" \
+                  --image-src docker --scanners vuln --pkg-types os,library \
+                  --no-progress --format table --timeout 10m0s \
+                  --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL \
+                  "$IMAGE_ID"
+          )
+
+      - name: Verify exact image layers contain no Nikon SDK material
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
         run: |
           set -euo pipefail
-          mapfile -t tags <<< "$IMAGE_TAGS"
-          test "${#tags[@]}" -gt 0
+          test "$(sha256sum docker/nikon-sdk-v1.46.sha256 | awk '{print $1}')" \
+            = 0e8aba70b296966c03c407c8dd77ddee5c073924b9fb38f988881c366a1fbc51
+          test "$(docker image inspect nef-watch:validation --format '{{.Id}}')" = "$IMAGE_ID"
+          docker save --output sdk-free-image.tar "$IMAGE_ID"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import tarfile
+          from pathlib import Path, PurePosixPath
 
-          first_output="$(docker push "${tags[0]}" 2>&1 | tee /dev/stderr)"
-          digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' \
-            <<< "$first_output" | tail -n 1)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          manifest_path = Path("docker/nikon-sdk-v1.46.sha256")
+          forbidden_names = set()
+          forbidden_hashes = set()
+          for line in manifest_path.read_text(encoding="utf-8").splitlines():
+              digest, relative = line.split(maxsplit=1)
+              if len(digest) != 64:
+                  raise SystemExit("malformed Nikon SDK manifest")
+              forbidden_hashes.add(digest)
+              forbidden_names.add(PurePosixPath(relative).name.casefold())
 
-          for tag in "${tags[@]:1}"; do
-            docker push "$tag"
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          matches = []
+          with tarfile.open("sdk-free-image.tar", mode="r:") as image:
+              manifest_stream = image.extractfile("manifest.json")
+              if manifest_stream is None:
+                  raise SystemExit("Docker archive has no manifest.json")
+              image_manifest = json.load(manifest_stream)
+              if not isinstance(image_manifest, list) or len(image_manifest) != 1:
+                  raise SystemExit("Docker archive must contain exactly one image")
+              layers = image_manifest[0].get("Layers")
+              if not isinstance(layers, list) or not layers:
+                  raise SystemExit("Docker archive contains no layers")
+              for layer_name in layers:
+                  layer_stream = image.extractfile(layer_name)
+                  if layer_stream is None:
+                      raise SystemExit(f"Docker archive is missing {layer_name}")
+                  with tarfile.open(fileobj=layer_stream, mode="r|*") as layer:
+                      for member in layer:
+                          basename = PurePosixPath(member.name).name.casefold()
+                          if basename.startswith(".wh."):
+                              continue
+                          if basename in forbidden_names:
+                              matches.append(f"{layer_name}:{member.name}")
+                              continue
+                          if not member.isfile():
+                              continue
+                          stream = layer.extractfile(member)
+                          if stream is None:
+                              raise SystemExit(f"cannot inspect {member.name}")
+                          if hashlib.file_digest(stream, "sha256").hexdigest() in forbidden_hashes:
+                              matches.append(f"{layer_name}:{member.name}")
+          if matches:
+              raise SystemExit("Nikon SDK material found: " + ", ".join(matches))
+          print("SDK-free image-layer audit: PASS")
+          PY
+          rm -f sdk-free-image.tar
 
-      - name: Attest image provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
-        with:
-          subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.publish.outputs.digest }}
-          push-to-registry: true
+      - name: Run bounded help from the exact image
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect nef-watch:validation --format '{{.Id}}')" = "$IMAGE_ID"
+          timeout --signal=TERM --kill-after=5s 30s \
+            docker run --rm --pull never --platform linux/amd64 \
+              --user 99:100 --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges:true \
+              --memory 256m --memory-swap 256m --cpus 1 --pids-limit 64 \
+              --ulimit nofile=128:128 --ulimit fsize=16777216:16777216 \
+              --log-driver none \
+              "$IMAGE_ID" --help >/dev/null
