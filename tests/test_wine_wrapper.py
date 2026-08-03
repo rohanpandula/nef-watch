@@ -409,6 +409,7 @@ printf 'raw' > "$NEF_WATCH_JOB_ROOT/output/render.raw"
             root = Path(directory)
             env, _, source, raw, profile, _ = self.make_fixture(root)
             env.pop("NEF_WATCH_REQUIRE_LANDLOCK")
+            env.pop("NEF_WATCH_TEST_PYTHON_BIN")
             env.pop("NEF_WATCH_X_SOCKET_DIR")
             default_x_socket = Path("/tmp/.X11-unix")
             created_default_x_socket = not default_x_socket.exists()
